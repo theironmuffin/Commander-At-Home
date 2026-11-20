@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://cvcy242grci5w"]
+
+[ext_resource type="Script" uid="uid://be64t8njiilo7" path="res://Card3D.gd" id="1_eeaw3"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ofdej"]
+size = Vector3(0.635, 0.003, 0.889)
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ofdej"]
+size = Vector2(0.635, 0.889)
+
+[node name="Card3D" type="Area3D" unique_id=204659006]
+script = ExtResource("1_eeaw3")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2047018366]
+shape = SubResource("BoxShape3D_ofdej")
+
+[node name="FrontHTTPRequest" type="HTTPRequest" parent="." unique_id=1700273774]
+
+[node name="FrontFace" type="MeshInstance3D" parent="." unique_id=573912423]
+mesh = SubResource("PlaneMesh_ofdej")
+
+[node name="BackHTTPRequest" type="HTTPRequest" parent="." unique_id=204744679]

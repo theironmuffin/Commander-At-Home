@@ -1,0 +1,55 @@
+[gd_scene format=3 uid="uid://br2ang02p1ih4"]
+
+[ext_resource type="Script" uid="uid://csm5ci6582c6k" path="res://Main.gd" id="1_glv2v"]
+[ext_resource type="Script" uid="uid://c0rx1d8dobqfy" path="res://CameraControls.gd" id="2_uu6xs"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ofdej"]
+size = Vector2(16, 16)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_uu6xs"]
+
+[node name="Main" type="Node3D" unique_id=1440057684]
+script = ExtResource("1_glv2v")
+CardScene = null
+hand_start_x = null
+hand_y = null
+hand_z = null
+card_spacing_x = null
+max_hand_width = null
+library_x = null
+library_y = null
+library_z = null
+card_thickness = null
+graveyard_x = null
+graveyard_y = null
+graveyard_z = null
+command_zone_x = null
+command_zone_y = null
+command_zone_z = null
+exile_x = null
+exile_y = null
+exile_z = null
+battlefield_lands_start_x = null
+battlefield_lands_y = null
+battlefield_lands_z = null
+battlefield_lands_spacing_x = null
+battlefield_non_lands_start_x = null
+battlefield_non_lands_y = null
+battlefield_non_lands_z = null
+battlefield_non_lands_spacing_x = null
+
+[node name="tableSurface" type="MeshInstance3D" parent="." unique_id=1005794917]
+mesh = SubResource("PlaneMesh_ofdej")
+surface_material_override/0 = SubResource("StandardMaterial3D_uu6xs")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=844211485]
+transform = Transform3D(1, 0, 0, 0, 0.6293204, 0.777146, 0, -0.777146, 0.6293204, 0, 3, 7)
+fov = 60.0
+script = ExtResource("2_uu6xs")
+home_rotation = Vector3(-51, 0, 0)
+
+[node name="HandContainer" type="Node3D" parent="Camera3D" unique_id=538519479]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, -2)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1359783564]
+transform = Transform3D(1, 0, 0, 0, -0.18477406, 0.98278105, 0, -0.98278105, -0.18477406, 0, 9.890016, 0)

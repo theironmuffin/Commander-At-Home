@@ -1,0 +1,497 @@
+[
+  {
+    "id": 27463170,
+    "name": "The Great Goblin",
+    "commander": "The Great Goblin",
+    "totalValue": 161.91,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/27463170",
+    "updatedAt": "2026-10-17T17:25:11.781166Z"
+  },
+  {
+    "id": 3132489,
+    "name": "Bard's Cards and Guards Gonna Scar the Yard Hard, Avant-garde",
+    "commander": "Bard, King of Dale",
+    "totalValue": 241.94,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3132489",
+    "updatedAt": "2026-10-15T18:41:38.367095Z"
+  },
+  {
+    "id": 3134021,
+    "name": "You Can't Spell Slaughter Without Laughter",
+    "commander": "Rakdos, the Showstopper",
+    "totalValue": 389.4,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3134021",
+    "updatedAt": "2026-10-15T14:51:08.240626Z"
+  },
+  {
+    "id": 27319072,
+    "name": "Reality Fracture Precon",
+    "commander": "Jace, Multiverse Architect",
+    "totalValue": 153.08,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/27319072",
+    "updatedAt": "2026-10-11T14:45:10.048515Z"
+  },
+  {
+    "id": 16081006,
+    "name": "Proper Pauper Pingin' and Slingin'",
+    "commander": "Hawkeye, Young Avenger",
+    "totalValue": 93.04,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/16081006",
+    "updatedAt": "2026-10-11T02:20:54.055760Z"
+  },
+  {
+    "id": 768570,
+    "name": "Counting Counters With Lucea Kane",
+    "commander": "Magus Lucea Kane",
+    "totalValue": 584.1,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/768570",
+    "updatedAt": "2026-10-07T15:28:19.823556Z"
+  },
+  {
+    "id": 776323,
+    "name": "The Life and Times of Kytheon Jura",
+    "commander": "Kytheon, Hero of Akros // Gideon, Battle-Forged",
+    "totalValue": 265.98,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/776323",
+    "updatedAt": "2026-10-07T14:36:38.381123Z"
+  },
+  {
+    "id": 10914568,
+    "name": "Doran's Butt Bashin'",
+    "commander": "Doran, Besieged by Time",
+    "totalValue": 290.74,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/10914568",
+    "updatedAt": "2026-10-03T14:08:35.667072Z"
+  },
+  {
+    "id": 7528121,
+    "name": "Kykar's Entourage",
+    "commander": "Kykar, Wind's Fury",
+    "totalValue": 311.15,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7528121",
+    "updatedAt": "2026-10-02T12:53:20.680876Z"
+  },
+  {
+    "id": 771146,
+    "name": "Ghalta Knows No Mana Curve",
+    "commander": "Ghalta, Primal Hunger",
+    "totalValue": 488.53,
+    "cardCount": 105,
+    "archidektUrl": "https://archidekt.com/decks/771146",
+    "updatedAt": "2026-09-29T01:45:30.146579Z"
+  },
+  {
+    "id": 25141445,
+    "name": "Maralen, Elf Spewer",
+    "commander": "Maralen, Fae Ascendant",
+    "totalValue": 826.0,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/25141445",
+    "updatedAt": "2026-09-28T12:19:33.478746Z"
+  },
+  {
+    "id": 3132554,
+    "name": "Giada's Angels",
+    "commander": "Giada, Font of Hope",
+    "totalValue": 676.22,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3132554",
+    "updatedAt": "2026-09-28T02:06:26.520733Z"
+  },
+  {
+    "id": 17559526,
+    "name": "The Hills Are Alive",
+    "commander": "Bumi, Unleashed",
+    "totalValue": 477.45,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/17559526",
+    "updatedAt": "2026-09-28T01:41:58.678748Z"
+  },
+  {
+    "id": 3217574,
+    "name": "Omnath Mutate and Clone",
+    "commander": "Omnath, Locus of Creation",
+    "totalValue": 410.7,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3217574",
+    "updatedAt": "2026-09-16T16:47:20.485303Z"
+  },
+  {
+    "id": 19847791,
+    "name": "Sygg the Saboteur",
+    "commander": "Sygg, Wanderwine Wisdom // Sygg, Wanderbrine Shield",
+    "totalValue": 120.63,
+    "cardCount": 91,
+    "archidektUrl": "https://archidekt.com/decks/19847791",
+    "updatedAt": "2026-09-14T19:54:59.859045Z"
+  },
+  {
+    "id": 26287260,
+    "name": "It's Not Stealing If It's Already Dead",
+    "commander": "Thranduil, the Elvenking",
+    "totalValue": 579.5,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/26287260",
+    "updatedAt": "2026-09-14T17:13:06.178500Z"
+  },
+  {
+    "id": 7511681,
+    "name": "Sidar and Prava Have a Lot of Friends",
+    "commander": "Prava of the Steel Legion, Sidar Kondo of Jamuraa",
+    "totalValue": 238.57,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7511681",
+    "updatedAt": "2026-09-14T16:46:50.107920Z"
+  },
+  {
+    "id": 10472884,
+    "name": "Kind of Budget Brawlin' with Isshin",
+    "commander": "Isshin, Two Heavens as One",
+    "totalValue": 171.01,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/10472884",
+    "updatedAt": "2026-09-10T15:28:15.597250Z"
+  },
+  {
+    "id": 10365251,
+    "name": "Aveline's Undergrowth Assassins",
+    "commander": "Aveline de Grandpr\u00e9",
+    "totalValue": 193.64,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/10365251",
+    "updatedAt": "2026-09-10T12:48:43.193479Z"
+  },
+  {
+    "id": 3147458,
+    "name": "Dragons Go Urrrrr",
+    "commander": "The Ur-Dragon",
+    "totalValue": 319.22,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3147458",
+    "updatedAt": "2026-09-08T18:18:30.825484Z"
+  },
+  {
+    "id": 12395151,
+    "name": "Temur Dragons",
+    "commander": "Ureni of the Unwritten",
+    "totalValue": 148.01,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/12395151",
+    "updatedAt": "2026-09-08T18:16:55.840018Z"
+  },
+  {
+    "id": 24039747,
+    "name": "Doom's Villainy",
+    "commander": "Doctor Doom, King of Latveria",
+    "totalValue": 308.13,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/24039747",
+    "updatedAt": "2026-09-08T13:29:09.219691Z"
+  },
+  {
+    "id": 776962,
+    "name": "Syr Gwyn's Knights",
+    "commander": "Syr Gwyn, Hero of Ashvale",
+    "totalValue": 343.23,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/776962",
+    "updatedAt": "2026-09-01T12:59:57.601053Z"
+  },
+  {
+    "id": 7497423,
+    "name": "Welcome to Zacama's Park",
+    "commander": "Zacama, Primal Calamity",
+    "totalValue": 454.14,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7497423",
+    "updatedAt": "2026-08-31T19:05:13.905147Z"
+  },
+  {
+    "id": 17327323,
+    "name": "Crickey, She's a Beaut!",
+    "commander": "Kalakscion, Hunger Tyrant",
+    "totalValue": 59.14,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/17327323",
+    "updatedAt": "2026-08-31T16:54:27.586707Z"
+  },
+  {
+    "id": 775042,
+    "name": "Elendacrats",
+    "commander": "Elenda, the Dusk Rose",
+    "totalValue": 1041.5,
+    "cardCount": 107,
+    "archidektUrl": "https://archidekt.com/decks/775042",
+    "updatedAt": "2026-08-27T17:00:36.328301Z"
+  },
+  {
+    "id": 14587858,
+    "name": "Nine-Fingers' Gates to Fun",
+    "commander": "Nine-Fingers Keene",
+    "totalValue": 104.6,
+    "cardCount": 122,
+    "archidektUrl": "https://archidekt.com/decks/14587858",
+    "updatedAt": "2026-08-27T00:13:06.823446Z"
+  },
+  {
+    "id": 14933114,
+    "name": "Gary, What is This Deck?",
+    "commander": "Toxrill, the Corrosive",
+    "totalValue": 180.62,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/14933114",
+    "updatedAt": "2026-08-27T00:12:48.809173Z"
+  },
+  {
+    "id": 24950924,
+    "name": "Azula Spellslinger",
+    "commander": "Fire Lord Azula",
+    "totalValue": 212.68,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/24950924",
+    "updatedAt": "2026-08-27T00:10:19.527116Z"
+  },
+  {
+    "id": 3132201,
+    "name": "Phenax, but Zombies",
+    "commander": "Phenax, God of Deception",
+    "totalValue": 272.62,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3132201",
+    "updatedAt": "2026-08-26T12:02:06.307840Z"
+  },
+  {
+    "id": 25517782,
+    "name": "Heroes in the Storm",
+    "commander": "Storm, Windrider",
+    "totalValue": 170.13,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/25517782",
+    "updatedAt": "2026-08-26T01:21:00.895579Z"
+  },
+  {
+    "id": 3274052,
+    "name": "Tony's Tinkering Again",
+    "commander": "Tony Stark // The Invincible Iron Man",
+    "totalValue": 411.4,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3274052",
+    "updatedAt": "2026-08-21T14:46:13.323878Z"
+  },
+  {
+    "id": 771077,
+    "name": "Solphim Hates Playing Magic",
+    "commander": "Solphim, Mayhem Dominus",
+    "totalValue": 442.05,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/771077",
+    "updatedAt": "2026-08-21T14:45:58.008234Z"
+  },
+  {
+    "id": 771221,
+    "name": "Yidris Wheelin' and Dealin'",
+    "commander": "Yidris, Maelstrom Wielder",
+    "totalValue": 535.17,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/771221",
+    "updatedAt": "2026-08-20T14:34:29.391160Z"
+  },
+  {
+    "id": 7540117,
+    "name": "Kit Wilson Would Hate This Deck",
+    "commander": "Ikra Shidiqi, the Usurper, Ishai, Ojutai Dragonspeaker",
+    "totalValue": 121.39,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7540117",
+    "updatedAt": "2026-08-12T19:49:37.569095Z"
+  },
+  {
+    "id": 3132176,
+    "name": "Tatyova's Big Stuff (ft Keruga)",
+    "commander": "Tatyova, Benthic Druid",
+    "totalValue": 214.77,
+    "cardCount": 101,
+    "archidektUrl": "https://archidekt.com/decks/3132176",
+    "updatedAt": "2026-08-09T00:29:33.499064Z"
+  },
+  {
+    "id": 14933679,
+    "name": "The Kraken Awaits",
+    "commander": "Kenessos, Priest of Thassa",
+    "totalValue": 111.54,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/14933679",
+    "updatedAt": "2026-08-08T23:31:57.069857Z"
+  },
+  {
+    "id": 12869070,
+    "name": "Aragorn, the Multicolored",
+    "commander": "Aragorn, the Uniter",
+    "totalValue": 72.18,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/12869070",
+    "updatedAt": "2026-07-31T01:50:58.563838Z"
+  },
+  {
+    "id": 24656455,
+    "name": "Ashnod - Only One Mana",
+    "commander": "Ashnod, Flesh Mechanist",
+    "totalValue": 63.77,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/24656455",
+    "updatedAt": "2026-07-24T20:07:26.877678Z"
+  },
+  {
+    "id": 15758689,
+    "name": "Get Cash Fast With Ognis!",
+    "commander": "Ognis, the Dragon's Lash",
+    "totalValue": 150.63,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/15758689",
+    "updatedAt": "2026-07-22T12:55:39.647048Z"
+  },
+  {
+    "id": 776255,
+    "name": "It's a Miracle If This Is Competitive",
+    "commander": "Molecule Man",
+    "totalValue": 377.03,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/776255",
+    "updatedAt": "2026-07-13T19:14:48.842351Z"
+  },
+  {
+    "id": 1387180,
+    "name": "Feather's Fancy Fighting Forte",
+    "commander": "Feather, the Redeemed",
+    "totalValue": 187.54,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/1387180",
+    "updatedAt": "2026-07-13T17:57:58.314198Z"
+  },
+  {
+    "id": 3132806,
+    "name": "Pirate Party with Edward!",
+    "commander": "Edward Kenway",
+    "totalValue": 361.42,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3132806",
+    "updatedAt": "2026-07-08T00:42:20.327011Z"
+  },
+  {
+    "id": 17459857,
+    "name": "Aang's Lessons",
+    "commander": "Avatar Aang // Aang, Master of Elements",
+    "totalValue": 242.91,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/17459857",
+    "updatedAt": "2026-07-08T00:42:00.278231Z"
+  },
+  {
+    "id": 20586904,
+    "name": "Who Needs the Foot?",
+    "commander": "Michelangelo, the Heart, Leonardo, the Balance",
+    "totalValue": 166.69,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/20586904",
+    "updatedAt": "2026-07-08T00:41:36.378977Z"
+  },
+  {
+    "id": 3133133,
+    "name": "Rin and Seri Kitties and Doggies",
+    "commander": "Rin and Seri, Inseparable",
+    "totalValue": 207.28,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3133133",
+    "updatedAt": "2026-07-08T00:41:10.655103Z"
+  },
+  {
+    "id": 774105,
+    "name": "Bruna's Fashion Show",
+    "commander": "Bruna, Light of Alabaster",
+    "totalValue": 563.76,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/774105",
+    "updatedAt": "2026-06-12T18:20:53.755245Z"
+  },
+  {
+    "id": 774157,
+    "name": "Merieke Is Greedy",
+    "commander": "Merieke Ri Berit",
+    "totalValue": 580.96,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/774157",
+    "updatedAt": "2026-06-12T15:29:11.974297Z"
+  },
+  {
+    "id": 13704211,
+    "name": "To Zanarkand",
+    "commander": "Tidus, Yuna's Guardian",
+    "totalValue": 159.03,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/13704211",
+    "updatedAt": "2026-06-04T05:18:47.191515Z"
+  },
+  {
+    "id": 7535585,
+    "name": "Saskia's Keyword Soup",
+    "commander": "Saskia the Unyielding",
+    "totalValue": 177.63,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7535585",
+    "updatedAt": "2026-05-22T22:02:06.918047Z"
+  },
+  {
+    "id": 7531695,
+    "name": "Slimefoot and Squeeeeeeeee",
+    "commander": "Slimefoot and Squee",
+    "totalValue": 204.33,
+    "cardCount": 101,
+    "archidektUrl": "https://archidekt.com/decks/7531695",
+    "updatedAt": "2026-05-06T14:23:06.048813Z"
+  },
+  {
+    "id": 777013,
+    "name": "Bruvac Talkin Himself to Death",
+    "commander": "Bruvac the Grandiloquent",
+    "totalValue": 470.16,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/777013",
+    "updatedAt": "2026-05-05T14:39:03.219783Z"
+  },
+  {
+    "id": 766736,
+    "name": "Kenrith at the Foily Gates",
+    "commander": "Kenrith, the Returned King",
+    "totalValue": 347.16,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/766736",
+    "updatedAt": "2026-04-25T01:48:54.387317Z"
+  },
+  {
+    "id": 3307589,
+    "name": "Mikaeus, Guess Who's Back?",
+    "commander": "Mikaeus, the Unhallowed",
+    "totalValue": 447.24,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/3307589",
+    "updatedAt": "2026-03-26T02:19:08.004123Z"
+  },
+  {
+    "id": 7531177,
+    "name": "Merry and Pippin Have a Feast",
+    "commander": "Pippin, Warden of Isengard, Merry, Warden of Isengard",
+    "totalValue": 435.46,
+    "cardCount": 100,
+    "archidektUrl": "https://archidekt.com/decks/7531177",
+    "updatedAt": "2026-03-25T19:01:39.753088Z"
+  }
+]
