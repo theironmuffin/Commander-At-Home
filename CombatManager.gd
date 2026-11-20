@@ -3,6 +3,7 @@ extends Node
 
 var engine: Node = null
 var selected_blocker: Node3D = null
+var blocker_damage_order: Dictionary = {}
 
 func setup(main_engine: Node) -> void:
 	engine = main_engine
@@ -129,6 +130,17 @@ func _resolve_combat_damage() -> void:
 					if invalid_blk.has_method("set_combat_status"): invalid_blk.set_combat_status("")
 				blockers_by_attacker.erase(atk)
 
+	for atk in blockers_by_attacker.keys():
+		if blocker_damage_order.has(atk):
+			var ordered: Array = blocker_damage_order[atk]
+			var cur_list: Array = blockers_by_attacker[atk]
+			var sorted_blks: Array = []
+			for ob in ordered:
+				if ob in cur_list: sorted_blks.append(ob)
+			for rem in cur_list:
+				if not (rem in sorted_blks): sorted_blks.append(rem)
+			blockers_by_attacker[atk] = sorted_blks
+
 	# Step 1: First Strike / Double Strike
 	_execute_combat_damage_pass(blockers_by_attacker, true)
 	engine.run_state_based_actions()
@@ -209,6 +221,8 @@ func _deal_combat_damage_to_player(source: Node3D, target_pid: int, amount: int)
 	if amount <= 0 or target_pid <= 0 or target_pid == engine.get_card_owner_id(source): return
 	engine.modify_life(target_pid, -amount)
 	EventBus.damage_dealt.emit(source, target_pid, amount)
+	if engine.monarch_player_id == target_pid:
+		engine.set_monarch(engine.get_card_owner_id(source))
 	var is_cmd: bool = (source.has_meta("is_commander") and bool(source.get_meta("is_commander"))) or (source in engine.command_zone_cards)
 	if is_cmd:
 		if not engine.commander_damage.has(target_pid):
@@ -219,6 +233,7 @@ func _deal_combat_damage_to_player(source: Node3D, target_pid: int, amount: int)
 
 func _cleanup_combat_declarations() -> void:
 	selected_blocker = null
+	blocker_damage_order.clear()
 	for card in engine.battlefield_non_lands:
 		if not is_instance_valid(card): continue
 		card.set("is_attacking", false)
@@ -302,3 +317,20 @@ func cycle_next_attacker() -> void:
 		var sp: Vector2 = cam.unproject_position(next_card.global_position)
 		engine.get_viewport().warp_mouse(sp.clamp(Vector2.ZERO, engine.get_viewport().get_visible_rect().size))
 	engine._on_card_hovered(next_card)
+
+func prompt_damage_order_if_needed() -> void:
+	if engine.turn_manager.active_player_id != engine.local_player_id: return
+	var blockers_by_atk := {}
+	for card in engine.battlefield_non_lands:
+		if is_instance_valid(card) and bool(card.get("is_blocking")) and card.get("blocking_target_creature") != null:
+			var atk: Node3D = card.get("blocking_target_creature")
+			if is_instance_valid(atk):
+				if not blockers_by_atk.has(atk): blockers_by_atk[atk] = []
+				blockers_by_atk[atk].append(card)
+	for atk in blockers_by_atk.keys():
+		var blks: Array = blockers_by_atk[atk]
+		if blks.size() >= 2 and engine.hud_manager.has_method("open_damage_order_popup"):
+			engine.hud_manager.open_damage_order_popup(atk, blks, func(ordered: Array):
+				blocker_damage_order[atk] = ordered
+			)
+			break

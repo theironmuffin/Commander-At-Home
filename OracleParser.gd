@@ -347,3 +347,216 @@ static func substitute_x_in_text(text: String, x_val: int) -> String:
 static func _roman_to_int(roman: String) -> int:
 	var map := {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
 	return int(map.get(roman.to_upper(), 0))
+
+
+static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) -> Array[Dictionary]:
+	_ensure_regex_initialized()
+	var out: Array[Dictionary] = []
+	if card_node != null and is_instance_valid(card_node) and card_node.has_meta("blood_moon_replaced") and bool(card_node.get_meta("blood_moon_replaced")):
+		out.append({
+			"label": "{T}: Add {R}",
+			"colors": ["R"] as Array[String],
+			"amount": 1,
+			"fixed_combo": [] as Array[String],
+			"tap_cost": true,
+			"mana_cost": "",
+			"life_cost": 0,
+			"sac_cost": false,
+			"restriction": "",
+			"restriction_text": ""
+		})
+		return out
+
+	var tl := MagicRules.get_card_type_line(card_data).to_lower()
+	if card_node != null and is_instance_valid(card_node) and "type_overrides" in card_node:
+		for ov in card_node.type_overrides:
+			tl += " " + str(ov).to_lower()
+
+	var oracle := str(MagicRules.get_card_attribute(card_data, "oracle_text", ""))
+	var tap_trigger_damage := 0
+	var tap_num_rx := RegEx.new()
+	tap_num_rx.compile("(\\d+)")
+	for t_line in oracle.split("\n"):
+		var tl_c := REMINDER_REGEX.sub(t_line, "", true).strip_edges().to_lower()
+		if "becomes tapped" in tl_c and "deals " in tl_c and ("damage to you" in tl_c or "damage to its controller" in tl_c):
+			var tm := tap_num_rx.search(tl_c.substr(tl_c.find("deals ")))
+			if tm: tap_trigger_damage += tm.get_string(1).to_int()
+	var sym_rx := RegEx.new()
+	sym_rx.compile("\\{([A-Z0-9/]+)\\}")
+	var num_rx := RegEx.new()
+	num_rx.compile("(\\d+)")
+
+	var chosen_type: String = str(card_node.get_meta("chosen_creature_type")) if (card_node != null and is_instance_valid(card_node) and card_node.has_meta("chosen_creature_type")) else ""
+	var chosen_color: String = str(card_node.get_meta("chosen_color")) if (card_node != null and is_instance_valid(card_node) and card_node.has_meta("chosen_color")) else ""
+
+	var seen_keys := {}
+	var basic_map := {"plains": "W", "island": "U", "swamp": "B", "mountain": "R", "forest": "G"}
+	for b_sub in basic_map.keys():
+		if b_sub in tl:
+			var col_c: String = basic_map[b_sub]
+			var key := "basic_" + col_c
+			if not seen_keys.has(key):
+				seen_keys[key] = true
+				out.append({
+					"label": "{T}: Add {%s}" % col_c,
+					"colors": [col_c] as Array[String],
+					"amount": 1,
+					"fixed_combo": [] as Array[String],
+					"tap_cost": true,
+					"mana_cost": "",
+					"life_cost": 0,
+					"sac_cost": false,
+					"restriction": "",
+					"restriction_text": ""
+				})
+
+	for raw_line in oracle.split("\n"):
+		var clean_line := REMINDER_REGEX.sub(raw_line, "", true).strip_edges()
+		if clean_line.is_empty(): continue
+		var lower := clean_line.to_lower()
+		var colon_idx := clean_line.find(":")
+		if colon_idx == -1 or not ("add " in lower):
+			continue
+		var cost_part := clean_line.substr(0, colon_idx).strip_edges()
+		var cost_lower := cost_part.to_lower()
+		var eff_part := clean_line.substr(colon_idx + 1).strip_edges()
+		var eff_lower := eff_part.to_lower()
+		if not ("add " in eff_lower):
+			continue
+
+		var tap_cost := "{t}" in cost_lower
+		var sac_cost := "sacrifice" in cost_lower
+		var mana_cost := ""
+		for m in sym_rx.search_all(cost_part.to_upper()):
+			var s := m.get_string(1)
+			if s != "T" and s != "Q":
+				mana_cost += "{" + s + "}"
+
+		var life_cost := tap_trigger_damage if tap_cost else 0
+		if "pay " in cost_lower and " life" in cost_lower:
+			var lm := num_rx.search(cost_lower.substr(cost_lower.find("pay ")))
+			if lm: life_cost += lm.get_string(1).to_int()
+		if "deals " in eff_lower and ("damage to you" in eff_lower or "damage to its controller" in eff_lower):
+			var dm := num_rx.search(eff_lower.substr(eff_lower.find("deals ")))
+			if dm: life_cost += dm.get_string(1).to_int()
+		if "lose " in eff_lower and " life" in eff_lower:
+			var lom := num_rx.search(eff_lower.substr(eff_lower.find("lose ")))
+			if lom: life_cost += lom.get_string(1).to_int()
+
+		var restriction := ""
+		var restriction_text := ""
+		if "spend this mana only to cast" in eff_lower:
+			if "chosen type" in eff_lower:
+				restriction = "chosen_type"
+				restriction_text = "Only for %s spells" % (chosen_type if not chosen_type.is_empty() else "chosen type")
+			elif "creature" in eff_lower:
+				restriction = "creature"
+				restriction_text = "Only for Creature spells"
+			elif "artifact" in eff_lower:
+				restriction = "artifact"
+				restriction_text = "Only for Artifact spells"
+			elif "instant or sorcery" in eff_lower:
+				restriction = "instant_or_sorcery"
+				restriction_text = "Only for Instant/Sorcery"
+			elif "commander" in eff_lower:
+				restriction = "commander"
+				restriction_text = "Only for Commander"
+			elif "enchantment" in eff_lower:
+				restriction = "enchantment"
+				restriction_text = "Only for Enchantment spells"
+			elif "planeswalker" in eff_lower:
+				restriction = "planeswalker"
+				restriction_text = "Only for Planeswalker spells"
+		elif "spend this mana only to activate" in eff_lower or "only on activated abilities" in eff_lower:
+			restriction = "activated"
+			restriction_text = "Only for Activated abilities"
+
+		var colors: Array[String] = []
+		var fixed_combo: Array[String] = []
+		var amount := 1
+
+		if "of the chosen color" in eff_lower and not chosen_color.is_empty():
+			colors = [chosen_color] as Array[String]
+		elif "any color" in eff_lower or "any one color" in eff_lower or "mana of any" in eff_lower:
+			colors = ["W", "U", "B", "R", "G"] as Array[String]
+		else:
+			var syms: Array[String] = []
+			for m in sym_rx.search_all(eff_part.to_upper()):
+				var sym := m.get_string(1)
+				if sym in ["W", "U", "B", "R", "G", "C"]:
+					syms.append(sym)
+			var add_clause_lower := eff_lower.split(".")[0]
+			if " or " in add_clause_lower:
+				for s in syms:
+					if not (s in colors): colors.append(s)
+			elif syms.size() == 1:
+				colors = [syms[0]] as Array[String]
+			elif syms.size() > 1:
+				var all_same := true
+				for s in syms:
+					if s != syms[0]: all_same = false; break
+				if all_same:
+					colors = [syms[0]] as Array[String]
+					amount = syms.size()
+				else:
+					fixed_combo = syms
+					colors = syms.duplicate()
+
+		if colors.is_empty() and fixed_combo.is_empty():
+			continue
+
+		var sig := "%s|%s|%d|%s|%d|%s" % [",".join(colors), ",".join(fixed_combo), amount, mana_cost, life_cost, restriction]
+		if seen_keys.has(sig): continue
+		seen_keys[sig] = true
+		if colors.size() == 1 and seen_keys.has("basic_" + colors[0]) and mana_cost.is_empty() and life_cost == 0 and not sac_cost and restriction.is_empty() and amount == 1:
+			continue
+
+		var cost_desc_parts: Array[String] = []
+		if tap_cost: cost_desc_parts.append("{T}")
+		if not mana_cost.is_empty(): cost_desc_parts.append(mana_cost)
+		if life_cost > 0: cost_desc_parts.append("Pay %d life" % life_cost)
+		if sac_cost: cost_desc_parts.append("Sacrifice")
+		var cost_str := ", ".join(cost_desc_parts) if not cost_desc_parts.is_empty() else "Free"
+		var out_str := ""
+		if not fixed_combo.is_empty():
+			for fc in fixed_combo: out_str += "{" + fc + "}"
+		elif colors.size() == 5 and "any color" in eff_lower:
+			out_str = "Any Color"
+		else:
+			var p_arr: Array[String] = []
+			for c in colors: p_arr.append("{" + c + "}")
+			out_str = " or ".join(p_arr)
+			if amount > 1: out_str = "%dx %s" % [amount, out_str]
+		var full_lbl := "%s: Add %s" % [cost_str, out_str]
+		if not restriction_text.is_empty():
+			full_lbl += " (" + restriction_text + ")"
+
+		out.append({
+			"label": full_lbl,
+			"colors": colors,
+			"amount": amount,
+			"fixed_combo": fixed_combo,
+			"tap_cost": tap_cost,
+			"mana_cost": mana_cost,
+			"life_cost": life_cost,
+			"sac_cost": sac_cost,
+			"restriction": restriction,
+			"restriction_text": restriction_text,
+			"chosen_type": chosen_type
+		})
+
+	if out.is_empty() and "land" in tl:
+		for c in MagicRules.get_land_colors(card_data):
+			out.append({
+				"label": "{T}: Add {%s}" % c,
+				"colors": [c] as Array[String],
+				"amount": 1,
+				"fixed_combo": [] as Array[String],
+				"tap_cost": true,
+				"mana_cost": "",
+				"life_cost": 0,
+				"sac_cost": false,
+				"restriction": "",
+				"restriction_text": ""
+			})
+	return out

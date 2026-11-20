@@ -1,8 +1,3 @@
-# Godot 4 cache & local builds
+# Godot 4+ specific ignores
 .godot/
-build/
-*.translation
-
-# OS junk
-.DS_Store
-Thumbs.db
+/android/

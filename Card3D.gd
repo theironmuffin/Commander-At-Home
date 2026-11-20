@@ -27,6 +27,7 @@ var is_highlighted: bool = false
 var front_face_rest_pos: Vector3
 var stored_front_texture: Texture2D = null
 var stored_back_texture: Texture2D = null
+var custom_sleeve_texture: Texture2D = null
 
 # Multi-Face / Split / Adventure / Room State
 var active_face_index: int = 0
@@ -52,6 +53,7 @@ var blocking_target_creature: Node3D = null
 var has_summoning_sickness: bool = true
 var loyalty_activated_this_turn: bool = false
 var goaded_by_player_id: int = 0
+var custom_statuses: Array[String] = []
 var has_flying: bool = false
 var parsed_abilities: Dictionary = {}
 
@@ -96,8 +98,9 @@ func _ready() -> void:
 	shader_mat.shader = CARD_SHADER
 	front_face.material_override = shader_mat
 
-	if LOCAL_CARD_BACK:
-		shader_mat.set_shader_parameter("back_tex", LOCAL_CARD_BACK)
+	var back_tex_to_use: Texture2D = custom_sleeve_texture if custom_sleeve_texture != null else LOCAL_CARD_BACK
+	if back_tex_to_use:
+		shader_mat.set_shader_parameter("back_tex", back_tex_to_use)
 
 	if front_http_request:
 		front_http_request.request_completed.connect(_on_front_request_completed)
@@ -244,40 +247,7 @@ func refresh_visual_status() -> void:
 		pt_badge_label.visible = false
 
 	if status_badge_label:
-		if not is_on_battlefield:
-			var gy_tags: Array[String] = []
-			if not in_library:
-				if not str(parsed_abilities.get("flashback_cost", "")).is_empty(): gy_tags.append("FB")
-				if not str(parsed_abilities.get("escape_cost", "")).is_empty(): gy_tags.append("ESC")
-				if not str(parsed_abilities.get("unearth_cost", "")).is_empty(): gy_tags.append("UNR")
-			if gy_tags.is_empty():
-				status_badge_label.visible = false
-			else:
-				status_badge_label.visible = true
-				status_badge_label.text = " · ".join(gy_tags)
-				status_badge_label.modulate = Color(0.4, 0.95, 0.85, 1.0)
-		else:
-			var tags: Array[String] = []
-			if is_creat and has_summoning_sickness and not has_keyword("haste"):
-				tags.append("SICK")
-			var kw_map := {
-				"flying": "FLY", "first strike": "1ST", "double strike": "DBL",
-				"deathtouch": "DT", "trample": "TRM", "vigilance": "VIG",
-				"lifelink": "LL", "haste": "HST", "reach": "RCH",
-				"indestructible": "IND", "hexproof": "HEX", "shroud": "SHR", "menace": "MEN"
-			}
-			for kw in kw_map.keys():
-				if has_keyword(kw):
-					tags.append(kw_map[kw])
-			var prot_arr: Array = parsed_abilities.get("protection_from", [])
-			if not prot_arr.is_empty(): tags.append("PRT")
-			if goaded_by_player_id > 0: tags.append("GOAD")
-			if tags.is_empty():
-				status_badge_label.visible = false
-			else:
-				status_badge_label.visible = true
-				status_badge_label.text = " · ".join(tags)
-				status_badge_label.modulate = Color(1.0, 0.78, 0.35, 1.0) if "SICK" in tags else Color(0.75, 0.92, 1.0, 1.0)
+		status_badge_label.visible = false
 
 func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _normal: Vector3, _shape_idx: int) -> void:
 	if not is_interactive: return
@@ -310,11 +280,25 @@ func make_active(data: Dictionary) -> void:
 	setup(data)
 	if collision_shape: collision_shape.disabled = false
 
+func set_sleeve_texture(tex: Texture2D) -> void:
+	custom_sleeve_texture = tex
+	var back_tex_to_use: Texture2D = custom_sleeve_texture if custom_sleeve_texture != null else LOCAL_CARD_BACK
+	if shader_mat and back_tex_to_use:
+		shader_mat.set_shader_parameter("back_tex", back_tex_to_use)
+		if in_library:
+			shader_mat.set_shader_parameter("front_tex", back_tex_to_use)
+
+func _update_foil_shader() -> void:
+	if shader_mat:
+		var is_foil: bool = (not in_library) and bool(card_data.get("is_foil", false))
+		shader_mat.set_shader_parameter("foil_amount", 1.0 if is_foil else 0.0)
+
 func setup(data: Dictionary) -> void:
 	card_data = data
 	is_interactive = true
 	parsed_abilities = OracleParser.parse_oracle_text(get_active_oracle_text())
 	refresh_visual_status()
+	_update_foil_shader()
 
 	var cur_tex := get_active_texture()
 	if cur_tex != null:
@@ -401,9 +385,11 @@ func setup_library() -> void:
 	rotation = Vector3(0, 0, PI)
 	force_unhover()
 	if collision_shape: collision_shape.disabled = true
-	if LOCAL_CARD_BACK:
-		shader_mat.set_shader_parameter("front_tex", LOCAL_CARD_BACK)
-		shader_mat.set_shader_parameter("back_tex", LOCAL_CARD_BACK)
+	_update_foil_shader()
+	var back_tex_to_use: Texture2D = custom_sleeve_texture if custom_sleeve_texture != null else LOCAL_CARD_BACK
+	if back_tex_to_use and shader_mat:
+		shader_mat.set_shader_parameter("front_tex", back_tex_to_use)
+		shader_mat.set_shader_parameter("back_tex", back_tex_to_use)
 
 func _on_mouse_entered() -> void:
 	if not is_interactive: return
@@ -547,6 +533,8 @@ func play_damage_flash() -> void:
 func _process(delta: float) -> void:
 	if not front_face: return
 	_fly_phase += delta * 2.4
+	if not (is_on_battlefield and has_custom_status("Monstrous")) and not front_face.scale.is_equal_approx(Vector3.ONE):
+		front_face.scale = front_face.scale.lerp(Vector3.ONE, minf(1.0, delta * 10.0))
 	if is_on_battlefield and has_flying and not is_hovered and not in_library:
 		var bob_y: float = front_face_rest_pos.y + 0.14 + sin(_fly_phase) * 0.032
 		if not (hover_tween and hover_tween.is_running()):
@@ -577,6 +565,12 @@ func _process(delta: float) -> void:
 			elif mode == "glint":
 				var g: float = maxf(0.0, sin(phase))
 				node.scale = Vector3.ONE * (0.4 + g * 0.9)
+			elif mode == "spin":
+				node.rotation.y = phase * 0.85
+				node.position.y = float(item["y"]) + sin(phase * 1.4) * 0.018
+			elif mode == "breathe":
+				var b: float = 1.0 + sin(phase) * 0.035
+				front_face.scale = Vector3(b, 1.0, b)
 
 func _setup_flair_root() -> void:
 	if not front_face: return
@@ -631,9 +625,32 @@ func _add_flair_blade(col: Color, offset: float) -> void:
 	_flair_root.add_child(mi)
 	_flair_items.append({"node": mi, "mode": "slash", "speed": 1.6, "offset": offset, "rx": 0.0, "rz": 0.0, "y": 0.045, "amp": 0.0})
 
+func _add_flair_torus(col: Color, inner_r: float, outer_r: float, y: float, speed: float) -> void:
+	var mi := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = inner_r
+	tm.outer_radius = outer_r
+	tm.rings = 16
+	tm.ring_segments = 8
+	mi.mesh = tm
+	mi.position = Vector3(0.0, y, -0.25)
+	mi.rotation_degrees = Vector3(65.0, 0.0, 0.0)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = col
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mi.material_override = mat
+	_flair_root.add_child(mi)
+	_flair_items.append({"node": mi, "mode": "spin", "speed": speed, "offset": 0.0, "rx": 0.0, "rz": 0.0, "y": y, "amp": 0.0})
+
 func _refresh_keyword_flairs() -> void:
 	if not _flair_root: return
-	var active := is_on_battlefield and not in_library
+	var has_gy_play := (not is_on_battlefield and not in_library) and (
+		not str(parsed_abilities.get("flashback_cost", "")).is_empty()
+		or not str(parsed_abilities.get("escape_cost", "")).is_empty()
+		or not str(parsed_abilities.get("unearth_cost", "")).is_empty()
+	)
+	var active := (is_on_battlefield and not in_library) or has_gy_play
 	_flair_root.visible = active
 	if not active: return
 
@@ -641,7 +658,14 @@ func _refresh_keyword_flairs() -> void:
 	for kw in ["flying", "first strike", "double strike", "deathtouch", "trample", "vigilance", "lifelink", "haste", "reach", "indestructible", "hexproof", "shroud", "ward", "menace", "flash", "defender"]:
 		if has_keyword(kw):
 			kws.append(kw)
-	var sig := ",".join(kws)
+	var is_creat := MagicRules.is_creature(card_data, active_face_index)
+	var is_sick := is_on_battlefield and is_creat and has_summoning_sickness and not has_keyword("haste")
+	var is_goaded := is_on_battlefield and goaded_by_player_id > 0
+	var prot_arr: Array = parsed_abilities.get("protection_from", [])
+	var has_prot := is_on_battlefield and not prot_arr.is_empty()
+	var c_stats := custom_statuses.duplicate()
+
+	var sig := "%s|sick:%s|goad:%s|prot:%s|gy:%s|cs:%s" % [",".join(kws), str(is_sick), str(is_goaded), str(has_prot), str(has_gy_play), ",".join(c_stats)]
 	if sig == _flair_signature: return
 	_flair_signature = sig
 
@@ -649,7 +673,11 @@ func _refresh_keyword_flairs() -> void:
 		ch.queue_free()
 	_flair_items.clear()
 
-	# Aura under-glows / frames
+	if has_gy_play and not is_on_battlefield:
+		_add_flair_ring(Color(0.30, 0.95, 0.85, 0.25), Vector2(0.71, 0.96), -0.004, "pulse", 1.6, 0.04)
+		return
+
+	# Keyword Auras & Accents
 	if "indestructible" in kws:
 		_add_flair_ring(Color(1.0, 0.84, 0.25, 0.28), Vector2(0.73, 0.98), -0.008, "pulse", 1.1, 0.03)
 	if "hexproof" in kws or "shroud" in kws or "ward" in kws:
@@ -663,7 +691,6 @@ func _refresh_keyword_flairs() -> void:
 	if "trample" in kws:
 		_add_flair_ring(Color(0.95, 0.35, 0.15, 0.22), Vector2(0.75, 1.00), -0.01, "pulse", 2.0, 0.08)
 
-	# Orbiting & kinetic keyword accents
 	if "haste" in kws:
 		_add_flair_mote(Color(1.0, 0.38, 0.12, 0.92), 0.028, "orbit", 2.8, 0.0, 0.36, 0.48, 0.04)
 		_add_flair_mote(Color(1.0, 0.65, 0.20, 0.85), 0.022, "orbit", 2.8, PI, 0.36, 0.48, 0.04)
@@ -685,3 +712,45 @@ func _refresh_keyword_flairs() -> void:
 		_add_flair_mote(Color(0.25, 0.90, 0.65, 0.85), 0.022, "glint", 1.5, 0.7, 0.0, -0.46, 0.08)
 	if "flash" in kws:
 		_add_flair_mote(Color(0.35, 0.92, 1.0, 0.95), 0.025, "glint", 3.2, 0.0, 0.28, -0.42, 0.06)
+
+	# Creature Status Animations (replacing 3D text badges)
+	if is_sick:
+		_add_flair_mote(Color(0.68, 0.75, 1.0, 0.55), 0.024, "orbit", 0.65, 0.0, 0.22, 0.32, 0.08)
+		_add_flair_mote(Color(0.55, 0.62, 0.95, 0.45), 0.018, "orbit", 0.65, PI, 0.22, 0.32, 0.11)
+	if is_goaded:
+		_add_flair_ring(Color(1.0, 0.18, 0.12, 0.30), Vector2(0.76, 1.01), -0.004, "pulse", 3.2, 0.09)
+	if has_prot:
+		_add_flair_ring(Color(0.85, 0.95, 1.0, 0.28), Vector2(0.75, 1.00), -0.003, "pulse", 1.5, 0.04)
+	if has_custom_status("Ring-bearer"):
+		_add_flair_torus(Color(1.0, 0.84, 0.22, 0.95), 0.08, 0.12, 0.14, 1.4)
+	if has_custom_status("Renowned"):
+		_add_flair_mote(Color(1.0, 0.92, 0.45, 0.95), 0.024, "orbit", 1.2, 0.0, 0.26, 0.38, 0.10)
+		_add_flair_mote(Color(1.0, 0.98, 0.85, 0.90), 0.020, "orbit", 1.2, PI, 0.26, 0.38, 0.10)
+	if has_custom_status("Monstrous"):
+		_add_flair_ring(Color(0.65, 0.12, 0.55, 0.28), Vector2(0.78, 1.03), -0.006, "pulse", 1.8, 0.07)
+		_flair_items.append({"node": front_face, "mode": "breathe", "speed": 1.3, "offset": 0.0, "rx": 0.0, "rz": 0.0, "y": 0.0, "amp": 0.035})
+	if has_custom_status("Suspected"):
+		_add_flair_ring(Color(1.0, 0.72, 0.15, 0.24), Vector2(0.72, 0.97), -0.004, "pulse", 2.1, 0.05)
+		_add_flair_mote(Color(1.0, 0.80, 0.20, 0.92), 0.026, "glint", 2.4, 0.0, 0.0, -0.35, 0.10)
+	if has_custom_status("Saddled"):
+		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.022, "glint", 1.4, 0.0, -0.30, 0.0, 0.05)
+		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.022, "glint", 1.4, 0.0, 0.30, 0.0, 0.05)
+
+func toggle_custom_status(status_name: String) -> void:
+	var key := status_name.strip_edges()
+	if key.is_empty(): return
+	var found_idx := -1
+	for i in range(custom_statuses.size()):
+		if custom_statuses[i].to_lower() == key.to_lower():
+			found_idx = i; break
+	if found_idx >= 0:
+		custom_statuses.remove_at(found_idx)
+	else:
+		custom_statuses.append(key)
+	refresh_visual_status()
+
+func has_custom_status(status_name: String) -> bool:
+	var low := status_name.strip_edges().to_lower()
+	for s in custom_statuses:
+		if s.to_lower() == low: return true
+	return false

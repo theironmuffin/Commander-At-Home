@@ -154,9 +154,9 @@ func update_battlefield_positions(animated: bool = false) -> void:
 	var p1_lands: Array[Node3D] = []
 	var p1_non_lands: Array[Node3D] = []
 	for c in engine.battlefield_lands:
-		if is_instance_valid(c) and engine.get_card_owner_id(c) == engine.local_player_id: p1_lands.append(c)
+		if is_instance_valid(c) and engine.get_card_controller_id(c) == engine.local_player_id: p1_lands.append(c)
 	for c in engine.battlefield_non_lands:
-		if is_instance_valid(c) and engine.get_card_owner_id(c) == engine.local_player_id: p1_non_lands.append(c)
+		if is_instance_valid(c) and engine.get_card_controller_id(c) == engine.local_player_id: p1_non_lands.append(c)
 
 	_arrange_cards_in_row(p1_lands, engine.battlefield_lands_spacing_x, engine.battlefield_lands_y, engine.battlefield_lands_z, animated, tween)
 	_arrange_cards_in_row(p1_non_lands, engine.battlefield_non_lands_spacing_x, engine.battlefield_non_lands_y, engine.battlefield_non_lands_z, animated, tween)
@@ -170,9 +170,9 @@ func update_battlefield_positions(animated: bool = false) -> void:
 		var opp_lands: Array[Node3D] = []
 		var opp_non_lands: Array[Node3D] = []
 		for c in engine.battlefield_lands:
-			if is_instance_valid(c) and engine.get_card_owner_id(c) == pid: opp_lands.append(c)
+			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid: opp_lands.append(c)
 		for c in engine.battlefield_non_lands:
-			if is_instance_valid(c) and engine.get_card_owner_id(c) == pid: opp_non_lands.append(c)
+			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid: opp_non_lands.append(c)
 		if not opp_lands.is_empty() and lands_anc:
 			_arrange_cards_in_row(opp_lands, engine.battlefield_lands_spacing_x, 0.0, 0.0, animated, tween, lands_anc)
 		if not opp_non_lands.is_empty() and non_lands_anc:
@@ -243,6 +243,8 @@ func remove_from_battlefield(card_node: Node3D) -> void:
 		for att in card_node.attachments.duplicate():
 			if is_instance_valid(att):
 				detach_card(att)
+	if card_node.has_meta("control_override_player_id"): card_node.remove_meta("control_override_player_id")
+	if "layer_controller_id" in card_node: card_node.layer_controller_id = 0
 	if card_node.has_method("clear_counters"): card_node.clear_counters()
 	update_battlefield_positions(true)
 	engine.run_state_based_actions()
@@ -256,74 +258,110 @@ func _destroy_if_token(card_node: Node3D) -> bool:
 		return true
 	return false
 
-func move_to_hand(card_node: Node3D) -> void:
-	if _destroy_if_token(card_node): return
-	remove_from_battlefield(card_node)
+func _erase_from_non_battlefield_zones(card_node: Node3D) -> void:
 	engine.graveyard_stack.erase(card_node)
 	engine.exile_stack.erase(card_node)
+	engine.library_stack.erase(card_node)
+	engine.command_zone_cards.erase(card_node)
+	engine.active_stack.erase(card_node)
+	if card_node in engine.hand_cards:
+		engine.hand_cards.erase(card_node)
+		update_hand_positions(true)
 	for pid in [2, 3, 4]:
 		engine.player_graveyards.get(pid, []).erase(card_node)
 		engine.player_exile.get(pid, []).erase(card_node)
+		engine.player_libraries.get(pid, []).erase(card_node)
+		engine.player_command_zones.get(pid, []).erase(card_node)
+		var p_hand: Array = engine.player_hands.get(pid, [])
+		if card_node in p_hand:
+			p_hand.erase(card_node)
+			update_opponent_hand_positions(pid, true)
+
+func move_to_hand(card_node: Node3D) -> void:
+	if _destroy_if_token(card_node): return
+	remove_from_battlefield(card_node)
+	_erase_from_non_battlefield_zones(card_node)
 
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.collision_shape: card_node.collision_shape.disabled = false
 
+	var owner_id: int = engine.get_card_owner_id(card_node)
 	var global_trans := card_node.global_transform
-	card_node.reparent(engine.hand_container, true)
-	card_node.global_transform = global_trans
-
-	engine.hand_cards.append(card_node)
-	update_hand_positions(true)
+	if owner_id == engine.local_player_id:
+		card_node.reparent(engine.hand_container, true)
+		card_node.global_transform = global_trans
+		engine.hand_cards.append(card_node)
+		update_hand_positions(true)
+	else:
+		var opp_cont: Node3D = engine.player_hand_containers.get(owner_id, null)
+		if opp_cont:
+			card_node.reparent(opp_cont, true)
+			card_node.global_transform = global_trans
+		engine.player_hands.get(owner_id, []).append(card_node)
+		update_opponent_hand_positions(owner_id, true)
 	update_zone_counters()
 
 func move_to_top_library(card_node: Node3D) -> void:
 	if _destroy_if_token(card_node): return
 	remove_from_battlefield(card_node)
-	engine.graveyard_stack.erase(card_node); engine.hand_cards.erase(card_node)
+	_erase_from_non_battlefield_zones(card_node)
 
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.has_method("setup_library"): card_node.setup_library()
 
-	engine.library_stack.append(card_node)
-	_animate_to_pile(card_node, engine.library_anchor, (engine.library_stack.size() - 1) * engine.card_thickness)
-	update_hand_positions(true); update_zone_counters()
+	var owner_id: int = engine.get_card_owner_id(card_node)
+	if owner_id == engine.local_player_id:
+		engine.library_stack.append(card_node)
+		_animate_to_pile(card_node, engine.library_anchor, (engine.library_stack.size() - 1) * engine.card_thickness)
+	else:
+		var lib_list: Array = engine.player_libraries.get(owner_id, [])
+		lib_list.append(card_node)
+		var lib_anc: Node3D = engine.player_stations[owner_id]["library"]
+		_animate_to_pile(card_node, lib_anc, (lib_list.size() - 1) * engine.card_thickness)
+	update_zone_counters()
 
 func move_to_bottom_library(card_node: Node3D) -> void:
 	if _destroy_if_token(card_node): return
 	remove_from_battlefield(card_node)
-	engine.graveyard_stack.erase(card_node); engine.hand_cards.erase(card_node)
+	_erase_from_non_battlefield_zones(card_node)
 
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.has_method("setup_library"): card_node.setup_library()
 
-	engine.library_stack.insert(0, card_node)
+	var owner_id: int = engine.get_card_owner_id(card_node)
+	var lib_list: Array = engine.library_stack if owner_id == engine.local_player_id else engine.player_libraries.get(owner_id, [])
+	var lib_anc: Node3D = engine.library_anchor if owner_id == engine.local_player_id else engine.player_stations[owner_id]["library"]
+	lib_list.insert(0, card_node)
 	var global_trans := card_node.global_transform
-	card_node.reparent(engine.library_anchor, true)
+	card_node.reparent(lib_anc, true)
 	card_node.global_transform = global_trans
 
 	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	for i in range(engine.library_stack.size()):
-		var c: Node3D = engine.library_stack[i]
+	for i in range(lib_list.size()):
+		var c: Node3D = lib_list[i]
 		tween.tween_property(c, "position", Vector3(0.0, i * engine.card_thickness, 0.0), 0.35)
 		tween.tween_property(c, "quaternion", Quaternion.IDENTITY, 0.35)
-	update_hand_positions(true); update_zone_counters()
+	update_zone_counters()
 
 func move_to_command_zone(card_node: Node3D) -> void:
 	if _destroy_if_token(card_node): return
 	remove_from_battlefield(card_node)
-	engine.graveyard_stack.erase(card_node); engine.active_stack.erase(card_node)
-	if card_node in engine.hand_cards: engine.hand_cards.erase(card_node); update_hand_positions(true)
-
-	if not card_node in engine.command_zone_cards: engine.command_zone_cards.append(card_node)
+	_erase_from_non_battlefield_zones(card_node)
 
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.collision_shape: card_node.collision_shape.disabled = false
+	if card_node.has_method("make_active"): card_node.make_active(card_node.card_data)
+
+	var owner_id: int = engine.get_card_owner_id(card_node)
+	var cmd_list: Array = engine.command_zone_cards if owner_id == engine.local_player_id else engine.player_command_zones.get(owner_id, [])
+	var cmd_anc: Node3D = engine.command_zone_anchor if owner_id == engine.local_player_id else engine.player_stations[owner_id]["command_zone"]
+	if not card_node in cmd_list: cmd_list.append(card_node)
 
 	var global_trans := card_node.global_transform
-	card_node.reparent(engine.command_zone_anchor, true)
+	card_node.reparent(cmd_anc, true)
 	card_node.global_transform = global_trans
 
-	var idx: int = engine.command_zone_cards.find(card_node)
+	var idx: int = cmd_list.find(card_node)
 	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tween.tween_property(card_node, "position", Vector3(idx * 0.7, 0.0, 0.0), 0.35)
 	tween.tween_property(card_node, "quaternion", Quaternion.IDENTITY, 0.35)
@@ -396,6 +434,7 @@ func move_to_graveyard(card_node: Node3D) -> void:
 	if _destroy_if_token(card_node): return
 	if _check_commander_redirect(card_node, "Graveyard", func(c): move_to_graveyard(c)): return
 	remove_from_battlefield(card_node)
+	_erase_from_non_battlefield_zones(card_node)
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.collision_shape: card_node.collision_shape.disabled = false
 
@@ -417,8 +456,7 @@ func move_to_exile(card_node: Node3D) -> void:
 	if _destroy_if_token(card_node): return
 	if _check_commander_redirect(card_node, "Exile", func(c): move_to_exile(c)): return
 	remove_from_battlefield(card_node)
-	engine.graveyard_stack.erase(card_node); engine.library_stack.erase(card_node)
-	if card_node in engine.hand_cards: engine.hand_cards.erase(card_node); update_hand_positions(true)
+	_erase_from_non_battlefield_zones(card_node)
 
 	card_node.is_on_battlefield = false; card_node.is_tapped = false
 	if card_node.collision_shape: card_node.collision_shape.disabled = false

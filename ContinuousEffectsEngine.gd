@@ -354,7 +354,7 @@ static func _count_matching_objects(oracle: String, controller: int, battlefield
 static func get_cost_reduction(card_data: Dictionary, caster_id: int, battlefield_lands: Array, battlefield_non_lands: Array) -> int:
 	var tl := MagicRules.get_card_type_line(card_data).to_lower()
 	var rx := RegEx.new()
-	rx.compile("cost\\s+\\{(\\d+)\\}\\s+less\\s+to\\s+cast")
+	rx.compile("costs?\\s+\\{(\\d+)\\}\\s+less\\s+to\\s+cast")
 	var total_red := 0
 	for p in battlefield_lands + battlefield_non_lands:
 		if not is_instance_valid(p) or _get_effective_controller(p) != caster_id: continue
@@ -364,7 +364,13 @@ static func get_cost_reduction(card_data: Dictionary, caster_id: int, battlefiel
 			if not m: continue
 			var amt := m.get_string(1).to_int()
 			var applies := false
-			if "creature spells you cast" in line and "creature" in tl: applies = true
+			if ("creature spells you cast" in line or "creature spell you cast" in line) and "creature" in tl:
+				applies = true
+				if "toughness greater than its power" in line:
+					var p_val := str(MagicRules.get_card_attribute(card_data, "power", "0")).to_int()
+					var t_val := str(MagicRules.get_card_attribute(card_data, "toughness", "0")).to_int()
+					if t_val <= p_val:
+						applies = false
 			elif "artifact spells you cast" in line and "artifact" in tl: applies = true
 			elif "enchantment spells you cast" in line and "enchantment" in tl: applies = true
 			elif "instant and sorcery spells you cast" in line and ("instant" in tl or "sorcery" in tl): applies = true

@@ -162,6 +162,24 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 
 	if "search your library" in c:
 		_handle_library_search(c, engine, owner_id); return
+	if "become the monarch" in c or "becomes the monarch" in c:
+		if engine: engine.set_monarch(owner_id)
+		return
+	if "take the initiative" in c:
+		if engine: engine.set_initiative(owner_id)
+		return
+	if "becomes day" in c:
+		if engine: engine.set_day_night("Day")
+		return
+	if "becomes night" in c:
+		if engine: engine.set_day_night("Night")
+		return
+	if "poison counter" in c or "energy counter" in c or "experience counter" in c or "rad counter" in c:
+		var p_key := "poison" if "poison" in c else ("energy" if "energy" in c else ("experience" if "experience" in c else "rad"))
+		var amt := _extract_number(c, "get ") if "get " in c else _extract_number(c, "gets ")
+		for pid in _resolve_affected_players(c, engine, owner_id, target):
+			if engine: engine.modify_player_counter(pid, p_key, amt)
+		return
 	if "counter target" in c or c.begins_with("counter "):
 		_handle_counter_spell(target, engine); return
 	if "create " in c and "token" in c:
@@ -206,7 +224,7 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 	if ("gains " in c or "gain " in c) and ("until end of turn" in c or "target " in c or "creatures you control" in c):
 		_handle_temp_keywords(c, source, target, engine, owner_id)
 		if _PT_REGEX.search(c) == null: return
-	if "until end of turn" in c and _PT_REGEX.search(c) != null:
+	if "until end of turn" in c and (_PT_REGEX.search(c) != null or ("+x/+x" in c and "difference between its power and toughness" in c)):
 		_handle_temp_pt(c, source, target, engine, owner_id); return
 	if " counter" in c:
 		_handle_counters(c, source, target, engine, owner_id); return
@@ -339,6 +357,41 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 				engine.zone_manager.update_opponent_hand_positions(pid, true)
 				engine._on_card_to_graveyard(best_card)
 
+static func _apply_noncombat_damage_modifiers(base_amount: int, source_controller_id: int, target_owner_id: int, target_is_permanent: bool, engine: Node) -> int:
+	if base_amount <= 0 or engine == null:
+		return base_amount
+	var amt := base_amount
+	var plus_rx := RegEx.new()
+	plus_rx.compile("plus\\s+(\\d+)")
+	for perm in engine.battlefield_lands + engine.battlefield_non_lands:
+		if not is_instance_valid(perm) or not perm.is_on_battlefield:
+			continue
+		var perm_ctrl: int = engine.get_card_owner_id(perm)
+		var oracle := str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "")).to_lower()
+		for line in oracle.split("\n"):
+			if not ("would deal" in line and "damage" in line and "instead" in line):
+				continue
+			if "source you control" in line and perm_ctrl != source_controller_id:
+				continue
+			if "to an opponent or a permanent an opponent controls" in line:
+				if target_owner_id == perm_ctrl:
+					continue
+			elif "to an opponent" in line and not ("permanent" in line):
+				if target_is_permanent or target_owner_id == perm_ctrl:
+					continue
+			if "plus x, where x is" in line and "'s power" in line:
+				var p_pow: int = maxi(0, int(perm.dynamic_power)) if "dynamic_power" in perm else 0
+				amt += p_pow
+			else:
+				var pm := plus_rx.search(line)
+				if pm:
+					amt += pm.get_string(1).to_int()
+			if "double that damage" in line or "twice that much damage" in line:
+				amt *= 2
+			elif "triple that damage" in line:
+				amt *= 3
+	return amt
+
 static func _handle_damage(c: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> void:
 	var amount := _extract_number(c, "deals ")
 	var has_deathtouch: bool = source != null and source.has_method("has_keyword") and bool(source.has_keyword("deathtouch"))
@@ -348,36 +401,46 @@ static func _handle_damage(c: String, source: Node3D, target: Variant, engine: N
 	if "each creature" in c or "all creatures" in c:
 		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
 			if "marked_damage" in n:
-				n.marked_damage += amount
+				var tgt_owner: int = engine.get_card_owner_id(n) if engine else -1
+				var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_owner, true, engine)
+				n.marked_damage += final_amt
 				if has_deathtouch: n.has_deathtouch_damage = true
 				n.refresh_visual_status()
-				total_dealt += amount
+				total_dealt += final_amt
 	elif "each opponent" in c or "each player" in c:
 		for pid in _resolve_affected_players(c, engine, owner_id, target):
-			if engine: engine.modify_life(pid, -amount); total_dealt += amount
+			if engine:
+				var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, pid, false, engine)
+				engine.modify_life(pid, -final_amt)
+				total_dealt += final_amt
 	elif target is Node3D and is_instance_valid(target):
 		var t_node := target as Node3D
+		var tgt_owner: int = engine.get_card_owner_id(t_node) if engine else -1
+		var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_owner, true, engine)
 		if MagicRules.has_protection_from(t_node, source):
 			pass
 		elif MagicRules.is_planeswalker(t_node.card_data):
 			if t_node.has_method("modify_named_counter"):
-				t_node.modify_named_counter("loyalty", -amount)
-			EventBus.damage_dealt.emit(source, t_node, amount)
-			total_dealt += amount
+				t_node.modify_named_counter("loyalty", -final_amt)
+			EventBus.damage_dealt.emit(source, t_node, final_amt)
+			total_dealt += final_amt
 		elif "marked_damage" in t_node:
-			t_node.marked_damage += amount
+			t_node.marked_damage += final_amt
 			if has_deathtouch: t_node.has_deathtouch_damage = true
 			t_node.refresh_visual_status()
-			EventBus.damage_dealt.emit(source, t_node, amount)
-			total_dealt += amount
+			EventBus.damage_dealt.emit(source, t_node, final_amt)
+			total_dealt += final_amt
 	elif target is int and engine:
-		engine.modify_life(int(target), -amount)
-		EventBus.damage_dealt.emit(source, int(target), amount)
-		total_dealt += amount
+		var tgt_pid := int(target)
+		var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_pid, false, engine)
+		engine.modify_life(tgt_pid, -final_amt)
+		EventBus.damage_dealt.emit(source, tgt_pid, final_amt)
+		total_dealt += final_amt
 	elif engine:
 		var opp_id: int = (owner_id % 4) + 1
-		engine.modify_life(opp_id, -amount)
-		total_dealt += amount
+		var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, opp_id, false, engine)
+		engine.modify_life(opp_id, -final_amt)
+		total_dealt += final_amt
 
 	if has_lifelink and total_dealt > 0 and engine:
 		engine.modify_life(owner_id, total_dealt)
@@ -392,6 +455,16 @@ static func _handle_life(c: String, engine: Node, owner_id: int, target: Variant
 		engine.modify_life(pid, delta)
 
 static func _handle_temp_pt(c: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> void:
+	if "difference between its power and toughness" in c and "+x/+x" in c:
+		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
+			if "temp_power_modifier" in n:
+				var cur_p: int = int(n.dynamic_power) if "dynamic_power" in n else 0
+				var cur_t: int = int(n.dynamic_toughness) if "dynamic_toughness" in n else 0
+				var diff: int = absi(cur_p - cur_t)
+				n.temp_power_modifier += diff
+				n.temp_toughness_modifier += diff
+				n.refresh_visual_status()
+		return
 	var m := _PT_REGEX.search(c)
 	if not m: return
 	var p_mod := m.get_string(1).to_int()

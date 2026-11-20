@@ -4,39 +4,66 @@ extends Node
 const CHUNK_SIZE = 75
 const API_URL = "https://api.scryfall.com/cards/collection"
 
-func fetch_batch_metadata(card_names: Array, callback: Callable) -> void:
-	var unique_names: Array[String] = []
+func fetch_batch_metadata(card_requests: Array, callback: Callable) -> void:
+	var unique_keys: Array[String] = []
+	var id_by_key := {}
+	var fallback_name_by_key := {}
 	var alias_map := {} # query_name -> [original_requested_names]
 
-	for raw_name in card_names:
-		var orig := str(raw_name).strip_edges()
-		if orig.is_empty(): continue
+	for raw_item in card_requests:
+		var orig := ""
+		var s_id := ""
+		var s_set := ""
+		var s_cn := ""
+		if raw_item is Dictionary:
+			orig = str(raw_item.get("name", "")).strip_edges()
+			s_id = str(raw_item.get("scryfall_id", "")).strip_edges()
+			s_set = str(raw_item.get("set", "")).strip_edges().to_lower()
+			s_cn = str(raw_item.get("collector_number", "")).strip_edges()
+		else:
+			orig = str(raw_item).strip_edges()
+		if orig.is_empty() and s_id.is_empty(): continue
 		# Scryfall's /cards/collection matches front-face names reliably for "A // B" cards
 		var query_name := orig.split(" // ")[0].strip_edges() if " // " in orig else orig
-		if not query_name in unique_names:
-			unique_names.append(query_name)
-		if not alias_map.has(query_name):
-			alias_map[query_name] = []
-		if not orig in alias_map[query_name]:
-			alias_map[query_name].append(orig)
+		if not query_name.is_empty():
+			if not alias_map.has(query_name): alias_map[query_name] = []
+			if not orig in alias_map[query_name]: alias_map[query_name].append(orig)
+
+		var req_key := ""
+		var ident := {}
+		if not s_id.is_empty():
+			req_key = "id:" + s_id
+			ident = {"id": s_id}
+		elif not s_set.is_empty() and not s_cn.is_empty():
+			req_key = "set:" + s_set + "|" + s_cn
+			ident = {"set": s_set, "collector_number": s_cn}
+		else:
+			req_key = "name:" + query_name
+			ident = {"name": query_name}
+
+		if not req_key in unique_keys:
+			unique_keys.append(req_key)
+			id_by_key[req_key] = ident
+			if not query_name.is_empty():
+				fallback_name_by_key[req_key] = query_name
 
 	var metadata_map := {}
 	var chunks: Array[Array] = []
+	for i in range(0, unique_keys.size(), CHUNK_SIZE):
+		var slice_keys := unique_keys.slice(i, i + CHUNK_SIZE)
+		var chunk_idents: Array[Dictionary] = []
+		for k in slice_keys:
+			chunk_idents.append(id_by_key[k])
+		chunks.append(chunk_idents)
 
-	for i in range(0, unique_names.size(), CHUNK_SIZE):
-		chunks.append(unique_names.slice(i, i + CHUNK_SIZE))
+	_fetch_chunks_recursive(chunks, 0, metadata_map, alias_map, fallback_name_by_key, callback)
 
-	_fetch_chunks_recursive(chunks, 0, metadata_map, alias_map, callback)
-
-func _fetch_chunks_recursive(chunks: Array[Array], chunk_idx: int, metadata_map: Dictionary, alias_map: Dictionary, callback: Callable) -> void:
+func _fetch_chunks_recursive(chunks: Array[Array], chunk_idx: int, metadata_map: Dictionary, alias_map: Dictionary, fallback_name_by_key: Dictionary, callback: Callable) -> void:
 	if chunk_idx >= chunks.size():
 		callback.call(metadata_map)
 		return
 
-	var chunk: Array = chunks[chunk_idx]
-	var identifiers: Array[Dictionary] = []
-	for card_name in chunk:
-		identifiers.append({"name": card_name})
+	var identifiers: Array = chunks[chunk_idx]
 
 	var http := HTTPRequest.new()
 	add_child(http)
@@ -48,9 +75,24 @@ func _fetch_chunks_recursive(chunks: Array[Array], chunk_idx: int, metadata_map:
 		if response_code == 200:
 			var json := JSON.new()
 			if json.parse(body.get_string_from_utf8()) == OK:
-				_parse_scryfall_response(json.get_data(), metadata_map, alias_map)
+				var resp_dict: Dictionary = json.get_data()
+				_parse_scryfall_response(resp_dict, metadata_map, alias_map)
+				# Queue name-based fallback for any printing ID / set+cn not found on Scryfall
+				var fb_idents: Array[Dictionary] = []
+				for nf in resp_dict.get("not_found", []):
+					if not (nf is Dictionary): continue
+					var nf_key := ""
+					if nf.has("id"): nf_key = "id:" + str(nf["id"])
+					elif nf.has("set") and nf.has("collector_number"): nf_key = "set:" + str(nf["set"]).to_lower() + "|" + str(nf["collector_number"])
+					if not nf_key.is_empty() and fallback_name_by_key.has(nf_key):
+						var fb_name: String = str(fallback_name_by_key[nf_key])
+						if not metadata_map.has(fb_name):
+							fb_idents.append({"name": fb_name})
+				if not fb_idents.is_empty():
+					for fi in range(0, fb_idents.size(), CHUNK_SIZE):
+						chunks.append(fb_idents.slice(fi, fi + CHUNK_SIZE))
 
-		_fetch_chunks_recursive(chunks, chunk_idx + 1, metadata_map, alias_map, callback)
+		_fetch_chunks_recursive(chunks, chunk_idx + 1, metadata_map, alias_map, fallback_name_by_key, callback)
 	)
 
 	var headers: Array[String] = ["Content-Type: application/json", "User-Agent: MTGBrawlSim/1.0"]
@@ -126,6 +168,8 @@ func _parse_scryfall_response(data: Dictionary, metadata_map: Dictionary, alias_
 
 			produced_mana = pm
 
+		var finishes: Array = j.get("finishes", [])
+		var foil_only: bool = (finishes.size() == 1 and str(finishes[0]) == "foil")
 		var entry := {
 			"name": card_name,
 			"layout": layout,
@@ -139,8 +183,16 @@ func _parse_scryfall_response(data: Dictionary, metadata_map: Dictionary, alias_
 			"power": power,
 			"toughness": toughness,
 			"image_url": image_url,
-			"card_faces": parsed_faces
+			"card_faces": parsed_faces,
+			"is_foil": foil_only
 		}
+		var j_id: String = str(j.get("id", "")).strip_edges()
+		var j_set: String = str(j.get("set", "")).strip_edges().to_lower()
+		var j_cn: String = str(j.get("collector_number", "")).strip_edges()
+		if not j_id.is_empty():
+			metadata_map["id:" + j_id] = entry
+		if not j_set.is_empty() and not j_cn.is_empty():
+			metadata_map["set:" + j_set + "|" + j_cn] = entry
 		metadata_map[card_name] = entry
 		if not parsed_faces.is_empty():
 			var front_name: String = parsed_faces[0]["name"]

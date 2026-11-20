@@ -58,7 +58,11 @@ func setup(main_engine: Node) -> void:
 
 func get_next_player_id(current_pid: int) -> int:
 	var idx := CLOCKWISE_ORDER.find(current_pid)
-	if idx == -1: return CLOCKWISE_ORDER[0]
+	if idx == -1: idx = 0
+	for step in range(1, CLOCKWISE_ORDER.size() + 1):
+		var cand: int = CLOCKWISE_ORDER[(idx + step) % CLOCKWISE_ORDER.size()]
+		if not engine.has_method("is_player_eliminated") or not engine.is_player_eliminated(cand):
+			return cand
 	return CLOCKWISE_ORDER[(idx + 1) % CLOCKWISE_ORDER.size()]
 
 func set_starting_player(pid: int) -> void:
@@ -247,6 +251,8 @@ func _step_single_phase() -> void:
 			current_turn_phase = TurnPhase.COMBAT_DECLARE_BLOCKERS
 		TurnPhase.COMBAT_DECLARE_BLOCKERS:
 			engine.empty_mana_pool()
+			if engine.combat_manager.has_method("prompt_damage_order_if_needed"):
+				engine.combat_manager.prompt_damage_order_if_needed()
 			current_turn_phase = TurnPhase.COMBAT_DAMAGE
 		TurnPhase.COMBAT_DAMAGE:
 			engine.empty_mana_pool()
@@ -259,6 +265,9 @@ func _step_single_phase() -> void:
 			current_turn_phase = TurnPhase.END
 		TurnPhase.END:
 			engine.empty_mana_pool()
+			if engine.monarch_player_id == active_player_id:
+				if active_player_id == engine.local_player_id: engine.draw_card()
+				else: engine._draw_opponent_card(active_player_id)
 			for c in engine.battlefield_non_lands.duplicate():
 				if is_instance_valid(c) and c.has_meta("unearthed") and bool(c.get_meta("unearthed")):
 					c.remove_meta("unearthed")

@@ -25,7 +25,7 @@ func show_deck_selector_ui() -> void:
 	canvas.add_child(center_container)
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(650, 620)
+	panel.custom_minimum_size = Vector2(780, 640)
 	var panel_style := StyleBoxFlat.new()
 	panel_style.bg_color = Color(0.1, 0.11, 0.14, 0.98); panel_style.border_color = Color(0.85, 0.7, 0.35, 0.9); panel_style.set_border_width_all(2)
 	panel_style.corner_radius_top_left = 14; panel_style.corner_radius_top_right = 14; panel_style.corner_radius_bottom_left = 14; panel_style.corner_radius_bottom_right = 14
@@ -182,6 +182,46 @@ func show_deck_selector_ui() -> void:
 			if cnt > 0: option_btn.select((option_btn.selected + 1) % cnt)
 		)
 
+		var sleeve_btn := Button.new()
+		var cur_slv: String = str(engine.player_sleeves.get(i, "")) if "player_sleeves" in engine else ""
+		sleeve_btn.text = ("Sleeve: " + cur_slv.get_file().left(10)) if not cur_slv.is_empty() else "Sleeve: Default"
+		sleeve_btn.custom_minimum_size = Vector2(125, 40)
+		sleeve_btn.add_theme_stylebox_override("normal", pill_btn_style)
+		sleeve_btn.add_theme_stylebox_override("hover", pill_btn_style)
+		hbox.add_child(sleeve_btn)
+
+		var sleeve_rst := Button.new()
+		sleeve_rst.text = "✕"
+		sleeve_rst.tooltip_text = "Reset sleeve to default"
+		sleeve_rst.custom_minimum_size = Vector2(36, 40)
+		sleeve_rst.add_theme_stylebox_override("normal", del_style)
+		sleeve_rst.add_theme_stylebox_override("hover", del_style)
+		hbox.add_child(sleeve_rst)
+
+		var pid_cap := i
+		sleeve_btn.pressed.connect(func():
+			var fd := FileDialog.new()
+			fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+			fd.access = FileDialog.ACCESS_FILESYSTEM
+			fd.use_native_dialog = true
+			fd.title = "Select Custom Sleeve Image for Player %d" % pid_cap
+			fd.add_filter("*.png, *.jpg, *.jpeg, *.webp", "Image Files")
+			canvas.add_child(fd)
+			fd.file_selected.connect(func(path: String):
+				if engine.has_method("set_player_sleeve"):
+					engine.set_player_sleeve(pid_cap, path)
+				sleeve_btn.text = "Sleeve: " + path.get_file().left(10)
+				fd.queue_free()
+			)
+			fd.canceled.connect(func(): fd.queue_free())
+			fd.popup_centered(Vector2i(700, 500))
+		)
+		sleeve_rst.pressed.connect(func():
+			if engine.has_method("set_player_sleeve"):
+				engine.set_player_sleeve(pid_cap, "")
+			sleeve_btn.text = "Sleeve: Default"
+		)
+
 	populate_all_dropdowns.call()
 
 	import_btn.pressed.connect(func():
@@ -312,7 +352,16 @@ func _on_archidekt_loaded_multi(code: int, body: PackedByteArray, deck_id: Strin
 			if c_name.is_empty(): continue
 			if "Commander" in item.get("categories", []):
 				commander = c_name if commander.is_empty() else (commander + " | " + c_name)
-			cards_array.append({"name": c_name, "quantity": qty})
+			var entry := {"name": c_name, "quantity": qty}
+			var s_id: String = str(c_data.get("uid", "")).strip_edges()
+			var s_set: String = str(c_data.get("edition", {}).get("editioncode", "")).strip_edges().to_lower()
+			var s_cn: String = str(c_data.get("collectorNumber", "")).strip_edges()
+			if not s_id.is_empty(): entry["scryfall_id"] = s_id
+			if not s_set.is_empty(): entry["set"] = s_set
+			if not s_cn.is_empty(): entry["collector_number"] = s_cn
+			var mod_str: String = str(item.get("modifier", "")).strip_edges().to_lower()
+			if "foil" in mod_str or "etched" in mod_str: entry["is_foil"] = true
+			cards_array.append(entry)
 
 		var cache_key := "archidekt_" + deck_id
 		var cache := CardManager.load_cache_from_disk()
@@ -344,10 +393,32 @@ func _on_moxfield_loaded_multi(code: int, body: PackedByteArray, deck_id: String
 
 		for c_name in data.get("commanders", {}).keys():
 			commander = c_name if commander.is_empty() else (commander + " | " + c_name)
-			cards_array.append({"name": c_name, "quantity": data["commanders"][c_name].get("quantity", 1)})
+			var m_entry: Dictionary = data["commanders"][c_name]
+			var m_card: Dictionary = m_entry.get("card", {})
+			var entry := {"name": c_name, "quantity": m_entry.get("quantity", 1)}
+			var s_id: String = str(m_card.get("scryfall_id", "")).strip_edges()
+			var s_set: String = str(m_card.get("set", "")).strip_edges().to_lower()
+			var s_cn: String = str(m_card.get("cn", "")).strip_edges()
+			if not s_id.is_empty(): entry["scryfall_id"] = s_id
+			if not s_set.is_empty(): entry["set"] = s_set
+			if not s_cn.is_empty(): entry["collector_number"] = s_cn
+			var f_str: String = str(m_entry.get("finish", "")).strip_edges().to_lower()
+			if f_str == "foil" or f_str == "etched": entry["is_foil"] = true
+			cards_array.append(entry)
 
 		for c_name in data.get("mainboard", {}).keys():
-			cards_array.append({"name": c_name, "quantity": data["mainboard"][c_name].get("quantity", 1)})
+			var m_entry: Dictionary = data["mainboard"][c_name]
+			var m_card: Dictionary = m_entry.get("card", {})
+			var entry := {"name": c_name, "quantity": m_entry.get("quantity", 1)}
+			var s_id: String = str(m_card.get("scryfall_id", "")).strip_edges()
+			var s_set: String = str(m_card.get("set", "")).strip_edges().to_lower()
+			var s_cn: String = str(m_card.get("cn", "")).strip_edges()
+			if not s_id.is_empty(): entry["scryfall_id"] = s_id
+			if not s_set.is_empty(): entry["set"] = s_set
+			if not s_cn.is_empty(): entry["collector_number"] = s_cn
+			var f_str: String = str(m_entry.get("finish", "")).strip_edges().to_lower()
+			if f_str == "foil" or f_str == "etched": entry["is_foil"] = true
+			cards_array.append(entry)
 
 		var cache_key := "moxfield_" + deck_id
 		var cache := CardManager.load_cache_from_disk()
@@ -395,35 +466,60 @@ func load_and_spawn_all_decks(selections: Dictionary) -> void:
 		var cards_array: Array = live_deck_data.get("cards", [])
 		var designated_commander := str(deck_info.get("commander", live_deck_data.get("commander", ""))).strip_edges()
 
-		var raw_card_names: Array[String] = []
+		var raw_card_reqs: Array = []
 		for item in cards_array:
 			var c_name := ""
 			var qty := 1
+			var s_id := ""
+			var s_set := ""
+			var s_cn := ""
+			var is_foil := false
 			if item is Dictionary:
 				if item.has("card"):
 					var c_node: Dictionary = item.get("card", {})
 					var o_node: Dictionary = c_node.get("oracleCard", {})
 					c_name = o_node.get("name", c_node.get("name", ""))
+					s_id = str(c_node.get("uid", c_node.get("scryfall_id", ""))).strip_edges()
+					s_set = str(c_node.get("edition", {}).get("editioncode", c_node.get("set", ""))).strip_edges().to_lower()
+					s_cn = str(c_node.get("collectorNumber", c_node.get("cn", ""))).strip_edges()
+					var mod_s: String = str(item.get("modifier", item.get("finish", ""))).strip_edges().to_lower()
+					is_foil = bool(item.get("is_foil", false)) or ("foil" in mod_s) or ("etched" in mod_s)
 				else:
-					c_name = item.get("name", "")
-				qty = item.get("quantity", 1)
+					c_name = str(item.get("name", ""))
+					s_id = str(item.get("scryfall_id", "")).strip_edges()
+					s_set = str(item.get("set", "")).strip_edges().to_lower()
+					s_cn = str(item.get("collector_number", "")).strip_edges()
+					is_foil = bool(item.get("is_foil", false))
+				qty = int(item.get("quantity", 1))
 
 			if not c_name.is_empty():
-				for q in range(qty): raw_card_names.append(c_name)
+				var req_obj := {"name": c_name, "scryfall_id": s_id, "set": s_set, "collector_number": s_cn, "is_foil": is_foil}
+				for q in range(qty): raw_card_reqs.append(req_obj)
 
 		var scryfall_service := ScryfallService.new()
 		engine.add_child(scryfall_service)
 		var svc_id := scryfall_service.get_instance_id()
 
-		scryfall_service.fetch_batch_metadata(raw_card_names, func(metadata_map: Dictionary):
+		scryfall_service.fetch_batch_metadata(raw_card_reqs, func(metadata_map: Dictionary):
 			var svc := instance_from_id(svc_id)
 			if svc and is_instance_valid(svc): svc.queue_free()
 			var built_cards := []
-			for card_name in raw_card_names:
-				if metadata_map.has(card_name):
-					built_cards.append(metadata_map[card_name].duplicate())
-				else:
-					built_cards.append({"name": card_name, "type_line": "Card", "image_url": ""})
+			for req_obj in raw_card_reqs:
+				var c_name: String = str(req_obj.get("name", ""))
+				var s_id: String = str(req_obj.get("scryfall_id", ""))
+				var s_set: String = str(req_obj.get("set", ""))
+				var s_cn: String = str(req_obj.get("collector_number", ""))
+				var matched: Variant = null
+				if not s_id.is_empty() and metadata_map.has("id:" + s_id):
+					matched = metadata_map["id:" + s_id]
+				elif not s_set.is_empty() and not s_cn.is_empty() and metadata_map.has("set:" + s_set + "|" + s_cn):
+					matched = metadata_map["set:" + s_set + "|" + s_cn]
+				elif metadata_map.has(c_name):
+					matched = metadata_map[c_name]
+				var card_d: Dictionary = matched.duplicate() if matched is Dictionary else {"name": c_name, "type_line": "Card", "image_url": ""}
+				if bool(req_obj.get("is_foil", false)):
+					card_d["is_foil"] = true
+				built_cards.append(card_d)
 
 			process_player_deck(pid, deck_info, built_cards, designated_commander)
 			_pending_deck_loads -= 1
@@ -469,6 +565,7 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 		engine.player_display_names[pid] = " & ".join(first_names)
 		engine.hud_manager.refresh_player_names()
 
+	var sleeve_tex: Texture2D = engine.get_player_sleeve_texture(pid) if engine.has_method("get_player_sleeve_texture") else null
 	var station_data: Dictionary = engine.player_stations[pid]
 	var cmd_anchor: Node3D = engine.command_zone_anchor if pid == engine.local_player_id else station_data["command_zone"]
 	var lib_anchor: Node3D = engine.library_anchor if pid == engine.local_player_id else station_data["library"]
@@ -480,6 +577,7 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 		cmd_card.card_data = cmd_data
 		cmd_card.set_meta("owner_id", pid)
 		cmd_card.set_meta("is_commander", true)
+		if sleeve_tex and cmd_card.has_method("set_sleeve_texture"): cmd_card.set_sleeve_texture(sleeve_tex)
 		engine.connect_card_signals(cmd_card)
 		cmd_anchor.add_child(cmd_card)
 		cmd_card.position = Vector3(i * 0.7, 0.0, 0.0)
@@ -503,6 +601,7 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 		var card_inst: Node3D = engine._instantiate_card()
 		card_inst.card_data = shuffled[i]
 		card_inst.set_meta("owner_id", pid)
+		if sleeve_tex and card_inst.has_method("set_sleeve_texture"): card_inst.set_sleeve_texture(sleeve_tex)
 		engine.connect_card_signals(card_inst)
 		hand_cont.add_child(card_inst)
 		if pid == engine.local_player_id:
@@ -515,6 +614,23 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 	if pid == engine.local_player_id:
 		engine.zone_manager.update_hand_positions(false)
 	else:
+		var ai_lands := 0
+		for hc in engine.player_hands[pid]:
+			if is_instance_valid(hc) and MagicRules.is_land(hc.card_data): ai_lands += 1
+		if (ai_lands <= 1 or ai_lands >= 6) and shuffled.size() >= 14:
+			for hc in engine.player_hands[pid]:
+				if is_instance_valid(hc): hc.queue_free()
+			engine.player_hands[pid].clear()
+			shuffled.shuffle()
+			for i in range(hand_size):
+				var mc: Node3D = engine._instantiate_card()
+				mc.card_data = shuffled[i]
+				mc.set_meta("owner_id", pid)
+				if sleeve_tex and mc.has_method("set_sleeve_texture"): mc.set_sleeve_texture(sleeve_tex)
+				engine.connect_card_signals(mc)
+				hand_cont.add_child(mc)
+				mc.setup_library()
+				engine.player_hands[pid].append(mc)
 		engine.zone_manager.update_opponent_hand_positions(pid, false)
 
 	var lib_cards := shuffled.slice(hand_size)
@@ -522,6 +638,7 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 		var card_inst: Node3D = engine._instantiate_card()
 		card_inst.card_data = lib_cards[i]
 		card_inst.set_meta("owner_id", pid)
+		if sleeve_tex and card_inst.has_method("set_sleeve_texture"): card_inst.set_sleeve_texture(sleeve_tex)
 		engine.connect_card_signals(card_inst)
 		lib_anchor.add_child(card_inst)
 		card_inst.position = Vector3(0.0, i * engine.card_thickness, 0.0)

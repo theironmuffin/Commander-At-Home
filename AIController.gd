@@ -16,6 +16,8 @@ func should_ai_act_on_priority(pid: int) -> bool:
 	var tm: TurnManager = engine.turn_manager
 	if not engine.active_stack.is_empty():
 		return _can_ai_respond_to_stack(pid)
+	if tm.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_BLOCKERS and tm.active_player_id != pid:
+		return _can_ai_cast_combat_instant(pid)
 	if tm.active_player_id != pid:
 		return false
 	return (
@@ -44,6 +46,10 @@ func _execute_ai_step(pid: int) -> void:
 	var tm: TurnManager = engine.turn_manager
 	if not engine.active_stack.is_empty():
 		_run_ai_stack_response(pid)
+		tm.pass_priority()
+		return
+	if tm.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_BLOCKERS and tm.active_player_id != pid:
+		_run_ai_combat_instant(pid)
 		tm.pass_priority()
 		return
 	match tm.current_turn_phase:
@@ -336,3 +342,30 @@ func pick_ai_target(ai_pid: int, effect_lower: String) -> Variant:
 					best_opp = c
 		return best_opp
 	return _pick_target_opponent(ai_pid)
+
+func _can_ai_cast_combat_instant(pid: int) -> bool:
+	for card in engine.player_hands.get(pid, []):
+		if not is_instance_valid(card): continue
+		if not MagicRules.can_cast_at_instant_speed(card.card_data, 0, pid, engine): continue
+		var ol := str(MagicRules.get_card_attribute(card.card_data, "oracle_text", "")).to_lower()
+		if "destroy target" in ol or "exile target" in ol or "deals " in ol:
+			return true
+	return false
+
+func _run_ai_combat_instant(pid: int) -> void:
+	for card in engine.player_hands.get(pid, []).duplicate():
+		if not is_instance_valid(card): continue
+		if not MagicRules.can_cast_at_instant_speed(card.card_data, 0, pid, engine): continue
+		var ol := str(MagicRules.get_card_attribute(card.card_data, "oracle_text", "")).to_lower()
+		if not ("destroy target" in ol or "exile target" in ol or "deals " in ol): continue
+		var tgt: Variant = pick_ai_target(pid, ol)
+		if tgt == null: continue
+		var raw_cost := str(card.card_data.get("mana_cost", ""))
+		var red := ContinuousEffectsEngine.get_cost_reduction(card.card_data, pid, engine.battlefield_lands, engine.battlefield_non_lands)
+		var mana_cost := ContinuousEffectsEngine.apply_cost_reduction(raw_cost, red)
+		if engine.can_pay_and_drain_cost(mana_cost, pid):
+			card.set_meta("chosen_target", tgt)
+			card.set_meta("target_requirement", OracleParser.extract_target_requirement(ol))
+			if card.has_method("make_active"): card.make_active(card.card_data)
+			engine.zone_manager.move_to_stack(card)
+			return

@@ -96,8 +96,12 @@ var local_player_id: int = 1
 var starting_player_id: int = 1
 var player_life: Dictionary = {1: 40, 2: 40, 3: 40, 4: 40}
 var player_display_names: Dictionary = {1: "Player 1", 2: "Player 2", 3: "Player 3", 4: "Player 4"}
+var player_sleeves: Dictionary = {1: "", 2: "", 3: "", 4: ""}
+var player_sleeve_textures: Dictionary = {}
+const SLEEVES_SAVE_PATH = "user://player_sleeves.json"
 var commander_damage: Dictionary = {1: {}, 2: {}, 3: {}, 4: {}}
 var mana_pool: Dictionary = {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
+var restricted_mana: Array[Dictionary] = []
 var land_played_this_turn: bool = false
 var mulligan_phase_active: bool = false
 var mulligan_count: int = 0
@@ -105,6 +109,14 @@ var mulligan_bottom_remaining: int = 0
 var hovered_card: Node3D = null
 var _last_upkeep_trigger_key: String = ""
 var _legend_rule_pending: bool = false
+var eliminated_players: Dictionary = {}
+var game_over_shown: bool = false
+var player_counters: Dictionary = {1: {}, 2: {}, 3: {}, 4: {}}
+var player_statuses: Dictionary = {1: [], 2: [], 3: [], 4: []}
+var monarch_player_id: int = 0
+var initiative_player_id: int = 0
+var battlefield_day_night: String = ""
+var player_dungeons: Dictionary = {1: {}, 2: {}, 3: {}, 4: {}}
 @export var controller_cursor_speed: float = 950.0
 var _popup_nav_cooldown: float = 0.0
 var targeting_arcs_mesh: ImmediateMesh = null
@@ -175,10 +187,12 @@ func _ready() -> void:
 		mat.roughness = 0.6
 		table_mesh.set_surface_override_material(0, mat)
 
+	_load_player_sleeves()
 	_setup_zone_anchors()
 	_setup_targeting_arcs()
 	EventBus.phase_changed.connect(_on_phase_changed_triggers)
 	EventBus.combat_declared.connect(_on_combat_declared_triggers)
+	EventBus.blocker_declared.connect(_on_blocker_declared_triggers)
 	EventBus.damage_dealt.connect(_on_damage_dealt_triggers)
 	EventBus.life_total_changed.connect(func(_p, _n, _a): refresh_command_info_stations())
 	EventBus.damage_dealt.connect(func(_s, _t, _a): refresh_command_info_stations())
@@ -205,13 +219,130 @@ func reset_game_and_reselect_decks() -> void:
 		hud_manager.hide_card_preview()
 	get_tree().reload_current_scene()
 
+func is_player_eliminated(pid: int) -> bool:
+	return bool(eliminated_players.get(pid, false))
+
+func _eliminate_player(pid: int) -> void:
+	eliminated_players[pid] = true
+	player_life[pid] = mini(0, int(player_life.get(pid, 0)))
+	for perm in (battlefield_lands + battlefield_non_lands).duplicate():
+		if is_instance_valid(perm) and get_card_owner_id(perm) == pid:
+			zone_manager.remove_from_battlefield(perm)
+			perm.visible = false
+	for s_item in active_stack.duplicate():
+		if s_item is Node3D and is_instance_valid(s_item) and get_card_owner_id(s_item) == pid:
+			active_stack.erase(s_item)
+			s_item.visible = false
+		elif not (s_item is Node3D) and int(s_item.controller_id) == pid:
+			active_stack.erase(s_item)
+	zone_manager.update_battlefield_positions(true)
+	refresh_command_info_stations()
+	EventBus.notify_stack(active_stack.size())
+
+	var alive: Array[int] = []
+	for p in [1, 2, 3, 4]:
+		if not is_player_eliminated(p): alive.append(p)
+	if alive.size() <= 1 and not game_over_shown:
+		game_over_shown = true
+		var winner_pid: int = alive[0] if not alive.is_empty() else -1
+		hud_manager.show_game_over_banner(winner_pid)
+
+func modify_player_counter(pid: int, counter_name: String, delta: int) -> void:
+	var key := counter_name.strip_edges().to_lower()
+	if not player_counters.has(pid): player_counters[pid] = {}
+	var next_val: int = maxi(0, int(player_counters[pid].get(key, 0)) + delta)
+	if next_val == 0: player_counters[pid].erase(key)
+	else: player_counters[pid][key] = next_val
+	refresh_command_info_stations()
+	run_state_based_actions()
+
+func toggle_player_status(pid: int, status_name: String) -> void:
+	if not player_statuses.has(pid): player_statuses[pid] = []
+	var arr: Array = player_statuses[pid]
+	if status_name in arr: arr.erase(status_name)
+	else: arr.append(status_name)
+	refresh_command_info_stations()
+	if hud_manager: hud_manager.update_phase_ui()
+
+func set_monarch(pid: int) -> void:
+	monarch_player_id = pid
+	refresh_command_info_stations()
+	if hud_manager: hud_manager.update_phase_ui()
+
+func set_initiative(pid: int) -> void:
+	initiative_player_id = pid
+	refresh_command_info_stations()
+	if hud_manager: hud_manager.update_phase_ui()
+
+func set_day_night(state_str: String) -> void:
+	battlefield_day_night = state_str
+	if hud_manager: hud_manager.update_phase_ui()
+
+func set_player_dungeon(pid: int, dungeon_name: String, room_num: int) -> void:
+	if dungeon_name.is_empty():
+		player_dungeons[pid] = {}
+	else:
+		player_dungeons[pid] = {"name": dungeon_name, "room": room_num}
+	refresh_command_info_stations()
+
 func get_player_display_name(pid: int) -> String:
 	return str(player_display_names.get(pid, "Player %d" % pid))
+
+func _load_player_sleeves() -> void:
+	if not FileAccess.file_exists(SLEEVES_SAVE_PATH): return
+	var f := FileAccess.open(SLEEVES_SAVE_PATH, FileAccess.READ)
+	if not f: return
+	var json := JSON.new()
+	if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
+		var d: Dictionary = json.get_data()
+		for k in d.keys():
+			var pid := int(k)
+			var p := str(d[k])
+			if not p.is_empty() and FileAccess.file_exists(p):
+				set_player_sleeve(pid, p, false)
+
+func _save_player_sleeves() -> void:
+	var f := FileAccess.open(SLEEVES_SAVE_PATH, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(player_sleeves))
+
+func get_player_sleeve_texture(pid: int) -> Texture2D:
+	return player_sleeve_textures.get(pid, null)
+
+func set_player_sleeve(pid: int, file_path: String, save_to_disk: bool = true) -> Texture2D:
+	var tex: Texture2D = null
+	if file_path.is_empty() or not FileAccess.file_exists(file_path):
+		player_sleeves[pid] = ""
+		player_sleeve_textures.erase(pid)
+	else:
+		var img := Image.load_from_file(file_path)
+		if img and not img.is_empty():
+			# Cap very large images while keeping stretchable UV aspect
+			if img.get_width() > 1024 or img.get_height() > 1024:
+				img.resize(mini(img.get_width(), 1024), mini(img.get_height(), 1024), Image.INTERPOLATE_LANCZOS)
+			tex = ImageTexture.create_from_image(img)
+			player_sleeves[pid] = file_path
+			player_sleeve_textures[pid] = tex
+		else:
+			player_sleeves[pid] = ""
+			player_sleeve_textures.erase(pid)
+	if save_to_disk:
+		_save_player_sleeves()
+	return tex
 
 func get_card_owner_id(card_node: Node3D) -> int:
 	if card_node and card_node.has_meta("owner_id"):
 		return int(card_node.get_meta("owner_id"))
 	return 1
+
+func get_card_controller_id(card_node: Node3D) -> int:
+	if not card_node or not is_instance_valid(card_node): return 1
+	if card_node.is_on_battlefield:
+		if card_node.has_meta("control_override_player_id"):
+			return int(card_node.get_meta("control_override_player_id"))
+		if "layer_controller_id" in card_node and int(card_node.layer_controller_id) > 0:
+			return int(card_node.layer_controller_id)
+	return get_card_owner_id(card_node)
 
 
 func _setup_targeting_arcs() -> void:
@@ -299,9 +430,14 @@ func _update_targeting_arcs() -> void:
 func _resolve_target_world_pos(target_val: Variant) -> Variant:
 	if target_val is Node3D and is_instance_valid(target_val):
 		return target_val.global_position
-	elif target_val is int and player_stations.has(int(target_val)):
-		var st: Node3D = player_stations[int(target_val)]["station"]
-		if is_instance_valid(st): return st.global_position
+	elif target_val is int:
+		var pid: int = int(target_val)
+		if command_info_stations.has(pid):
+			var cis_root: Node3D = command_info_stations[pid].get("root", null)
+			if is_instance_valid(cis_root): return cis_root.global_position
+		if player_stations.has(pid):
+			var st: Node3D = player_stations[pid].get("non_lands_anchor", player_stations[pid].get("station", null))
+			if is_instance_valid(st): return st.global_position
 	return null
 
 func counter_stack_item(index: int) -> void:
@@ -496,7 +632,7 @@ func _setup_command_info_stations() -> void:
 		var cmd_lbl := Label3D.new()
 		if BELEREN_FONT: cmd_lbl.font = BELEREN_FONT
 		cmd_lbl.text = ""
-		cmd_lbl.position = Vector3(0.0, 0.015, 0.16)
+		cmd_lbl.position = Vector3(0.0, 0.015, 0.13)
 		cmd_lbl.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
 		cmd_lbl.font_size = 20
 		cmd_lbl.outline_size = 8
@@ -504,7 +640,17 @@ func _setup_command_info_stations() -> void:
 		cmd_lbl.modulate = Color(1.0, 0.55, 0.45, 1.0)
 		root.add_child(cmd_lbl)
 
-		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl}
+		var st_lbl := Label3D.new()
+		if BELEREN_FONT: st_lbl.font = BELEREN_FONT
+		st_lbl.text = ""
+		st_lbl.position = Vector3(0.0, 0.015, 0.21)
+		st_lbl.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
+		st_lbl.font_size = 16
+		st_lbl.outline_size = 7
+		st_lbl.pixel_size = 0.0019
+		st_lbl.modulate = Color(0.55, 0.90, 1.0, 1.0)
+		root.add_child(st_lbl)
+		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl, "status": st_lbl}
 
 func refresh_command_info_stations() -> void:
 	for pid in command_info_stations.keys():
@@ -529,6 +675,21 @@ func refresh_command_info_stations() -> void:
 				if amt > 0 and is_instance_valid(cmd_card):
 					parts.append("%s %d" % [str(cmd_card.card_data.get("name", "Cmd")).split(" ")[0], amt])
 			cmd_lbl.text = ("Cmd: " + " · ".join(parts)) if not parts.is_empty() else ""
+		var st_lbl: Label3D = st.get("status", null)
+		if st_lbl and is_instance_valid(st_lbl):
+			var s_parts: Array[String] = []
+			if monarch_player_id == pid: s_parts.append("Monarch")
+			if initiative_player_id == pid: s_parts.append("Initiative")
+			for ps in player_statuses.get(pid, []):
+				s_parts.append(str(ps))
+			var p_cnts: Dictionary = player_counters.get(pid, {})
+			for ck in p_cnts.keys():
+				var cv: int = int(p_cnts[ck])
+				if cv > 0: s_parts.append("%s: %d" % [str(ck).capitalize(), cv])
+			var d_info: Dictionary = player_dungeons.get(pid, {})
+			if not d_info.is_empty():
+				s_parts.append("%s (Rm %d)" % [str(d_info.get("name", "Dungeon")).left(12), int(d_info.get("room", 1))])
+			st_lbl.text = " · ".join(s_parts)
 
 func setup_tabletop_layout() -> void:
 	central_stack_anchor = _create_anchor("CentralStack", Vector3(0.0, 0.55, 0.0))
@@ -641,6 +802,7 @@ func modify_life(player_id: int, amount: int) -> void:
 func empty_mana_pool() -> void:
 	for color in mana_pool.keys():
 		mana_pool[color] = 0
+	restricted_mana.clear()
 	event_ledger.log_event(GameEventLedger.EventType.MANA_EMPTIED, {})
 	EventBus.notify_mana(mana_pool)
 
@@ -730,9 +892,12 @@ func run_state_based_actions() -> void:
 			if int(cmd_map[cmd_card]) >= 21:
 				lost_by_cmd = true
 				break
-		if player_life[pid] <= 0 or lost_by_cmd:
+		var lost_by_poison: bool = int(player_counters.get(pid, {}).get("poison", 0)) >= 10
+		if player_life[pid] <= 0 or lost_by_cmd or lost_by_poison:
 			if hud_manager.life_labels.has(pid):
 				hud_manager.life_labels[pid].text = "DEAD"
+			if not is_player_eliminated(pid):
+				_eliminate_player(pid)
 
 	for t in graveyard_stack.duplicate():
 		if is_instance_valid(t) and t.get("is_token"):
@@ -752,6 +917,9 @@ func _on_phase_changed_triggers(new_phase: int) -> void:
 
 func _on_combat_declared_triggers(attacker: Node3D, _target_pid: int) -> void:
 	check_and_queue_triggers("ATTACK", attacker)
+
+func _on_blocker_declared_triggers(blocker: Node3D, _attacker: Node3D) -> void:
+	check_and_queue_triggers("BLOCK", blocker)
 
 func _on_damage_dealt_triggers(source: Node3D, target: Variant, amount: int) -> void:
 	if amount > 0 and target is int and is_instance_valid(source):
@@ -815,9 +983,12 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 				if "your end step" in event_raw and perm_owner != turn_manager.active_player_id: continue
 				_push_ability_to_stack(perm, trig, "Triggered")
 
-			elif event_name == "ATTACK" and src_valid and "attacks" in event_raw:
-				if perm == source_card or ("creature you control attacks" in event_raw and src_owner == perm_owner):
-					_push_ability_to_stack(perm, trig, "Triggered")
+			elif (event_name == "ATTACK" and src_valid and "attacks" in event_raw) or (event_name == "BLOCK" and src_valid and "blocks" in event_raw):
+				var is_ctrl_trigger: bool = ("creature you control" in event_raw and src_owner == perm_owner)
+				if perm == source_card or is_ctrl_trigger:
+					var eff_l: String = str(trig.get("effect_raw", "")).to_lower()
+					var def_tgt: Variant = source_card if (not ("target" in eff_l)) else null
+					_push_ability_to_stack(perm, trig, "Triggered", def_tgt)
 
 			elif event_name == "COMBAT_DAMAGE_PLAYER" and src_valid and "combat damage" in event_raw and "player" in event_raw:
 				if perm == source_card or ("creature you control deals combat damage" in event_raw and src_owner == perm_owner):
@@ -829,7 +1000,7 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 				if "noncreature" in event_raw and ("creature" in src_type): continue
 				_push_ability_to_stack(perm, trig, "Triggered")
 
-func _push_ability_to_stack(source_card: Node3D, ability_data: Dictionary, ability_type: String) -> void:
+func _push_ability_to_stack(source_card: Node3D, ability_data: Dictionary, ability_type: String, default_target: Variant = null) -> void:
 	var effect_raw: String = str(ability_data.get("effect_raw", ""))
 	var ctrl_id: int = get_card_owner_id(source_card)
 	if ability_type == "Triggered" and "target" in effect_raw.to_lower():
@@ -842,7 +1013,7 @@ func _push_ability_to_stack(source_card: Node3D, ability_data: Dictionary, abili
 			var ai_tgt = ai_controller.pick_ai_target(ctrl_id, effect_raw.to_lower())
 			_finalize_push_ability_to_stack(source_card, ability_data, ability_type, ai_tgt)
 			return
-	_finalize_push_ability_to_stack(source_card, ability_data, ability_type, null)
+	_finalize_push_ability_to_stack(source_card, ability_data, ability_type, default_target)
 
 func _finalize_push_ability_to_stack(source_card: Node3D, ability_data: Dictionary, ability_type: String, target_ref: Variant) -> void:
 	var stack_obj := StackObject.new()
@@ -1001,6 +1172,7 @@ func resolve_top_stack_card() -> void:
 			if x_etb > 0 and "x +1/+1 counter" in face_lower and card_node.has_method("modify_counters"):
 				card_node.modify_counters(x_etb)
 		_apply_etb_tapped_replacement(card_node, face_idx)
+		_apply_etb_choice_replacements(card_node, face_idx)
 		if "land" in type_line: battlefield_lands.append(card_node)
 		else: battlefield_non_lands.append(card_node)
 
@@ -1217,6 +1389,7 @@ func put_library_card_onto_battlefield(card_node: Node3D, pid: int = local_playe
 		if not card_node.is_tapped: card_node.toggle_tap()
 	elif is_land_card:
 		_apply_etb_tapped_replacement(card_node, 0)
+		_apply_etb_choice_replacements(card_node, 0)
 
 	if is_land_card: battlefield_lands.append(card_node)
 	else: battlefield_non_lands.append(card_node)
@@ -1265,59 +1438,18 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 		zone_manager.attach_card_to_creature(hud_manager.targeting_attachment, card_node)
 		return
 
-	var type_line := MagicRules.get_card_type_line(card_node.card_data).to_lower()
-	var combined_text := MagicRules.get_card_combined_text(card_node.card_data).to_upper()
-	var oracle_text: String = str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "")).to_upper()
-	var can_produce_mana := ("land" in type_line or "{T}: ADD" in combined_text or "ADD ONE MANA" in combined_text or "ADD " in combined_text)
-
-	if can_produce_mana:
+	var mana_abilities := OracleParser.parse_mana_abilities(card_node.card_data, card_node)
+	if not mana_abilities.is_empty():
 		if card_node.is_tapped: return
-		card_node.toggle_tap()
-		event_ledger.log_event(GameEventLedger.EventType.CARD_TAPPED, {"card_name": card_node.card_data.get("name", "")})
-
-		var total_fixed_colors: Array[String] = []
-		var total_generic_amount := 0
-		var has_choice_or := false
-		var has_any_color := "ANY COLOR" in oracle_text or "CHOSEN COLOR" in oracle_text or "CHOOSE A COLOR" in oracle_text
-
-		for line in oracle_text.split("\n"):
-			if "ADD" in line:
-				if " OR " in line: has_choice_or = true
-				for result in MANA_SYMBOL_REGEX.search_all(line):
-					var sym := result.get_string(1)
-					if sym.is_valid_int(): total_generic_amount += sym.to_int()
-					elif sym in ["W", "U", "B", "R", "G", "C"]: total_fixed_colors.append(sym)
-
-		var land_type_colors := {"Plains": "W", "Island": "U", "Swamp": "B", "Mountain": "R", "Forest": "G"}
-		var is_bm := card_node.has_meta("blood_moon_replaced") and bool(card_node.get_meta("blood_moon_replaced"))
-		var extracted_colors: Array[String] = [] if is_bm else MagicRules.get_land_colors(card_node.card_data)
-		if is_bm:
-			total_fixed_colors.clear()
-			total_generic_amount = 0
-			has_choice_or = false
-			has_any_color = false
-		if "type_overrides" in card_node:
-			for ov in card_node.type_overrides:
-				if land_type_colors.has(ov):
-					var col_code: String = land_type_colors[ov]
-					if not (col_code in extracted_colors): extracted_colors.append(col_code)
-		if has_choice_or or has_any_color or extracted_colors.size() > 1:
-			var choice_pool := extracted_colors if not extracted_colors.is_empty() else ["W", "U", "B", "R", "G", "C"]
-			if has_any_color and choice_pool.size() < 5: choice_pool = ["W", "U", "B", "R", "G"]
-			hud_manager.show_mana_choice_popup(card_node, choice_pool)
-			return
-
-		if not total_fixed_colors.is_empty() and total_generic_amount == 0 and not has_choice_or:
-			for c in total_fixed_colors: mana_pool[c] += 1
-			spawn_mana_produced_animation(card_node, total_fixed_colors)
-		elif total_generic_amount > 0:
-			mana_pool["C"] += total_generic_amount
-			spawn_mana_produced_animation(card_node, ["C"])
-		else:
-			var color_to_add: String = extracted_colors[0] if extracted_colors.size() == 1 else (total_fixed_colors[0] if total_fixed_colors.size() == 1 else "C")
-			mana_pool[color_to_add] += 1
-			spawn_mana_produced_animation(card_node, [color_to_add])
-		EventBus.notify_mana(mana_pool)
+		if mana_abilities.size() == 1:
+			var ab: Dictionary = mana_abilities[0]
+			var cols: Array = ab.get("colors", [])
+			var combo: Array = ab.get("fixed_combo", [])
+			var is_simple: bool = (cols.size() == 1 or not combo.is_empty()) and int(ab.get("life_cost", 0)) == 0 and str(ab.get("mana_cost", "")).is_empty() and not bool(ab.get("sac_cost", false)) and str(ab.get("restriction", "")).is_empty()
+			if is_simple:
+				add_mana_from_ability(card_node, ab, str(cols[0]) if not cols.is_empty() else "")
+				return
+		hud_manager.show_mana_ability_popup(card_node, mana_abilities)
 	else:
 		card_node.toggle_tap()
 
@@ -1409,6 +1541,123 @@ func _on_card_played(card_node: Node3D) -> void:
 	_cast_card_face(card_node, 0, false)
 
 
+func _does_mana_match_context(restriction: String, chosen_type: String, spell_context: Dictionary) -> bool:
+	if restriction.is_empty(): return true
+	var tl := str(spell_context.get("type_line", "")).to_lower()
+	var is_act := bool(spell_context.get("is_activated", false))
+	match restriction:
+		"activated": return is_act
+		"creature": return (not is_act) and ("creature" in tl)
+		"artifact": return (not is_act) and ("artifact" in tl)
+		"enchantment": return (not is_act) and ("enchantment" in tl)
+		"planeswalker": return (not is_act) and ("planeswalker" in tl)
+		"instant_or_sorcery": return (not is_act) and ("instant" in tl or "sorcery" in tl)
+		"commander": return (not is_act) and bool(spell_context.get("is_commander", false))
+		"chosen_type":
+			if is_act or not ("creature" in tl): return false
+			if chosen_type.is_empty(): return true
+			return chosen_type.to_lower() in tl
+	return true
+
+func add_mana_from_ability(card_node: Node3D, ab: Dictionary, chosen_color: String = "") -> void:
+	if not is_instance_valid(card_node): return
+	var tap_cost: bool = bool(ab.get("tap_cost", true))
+	if tap_cost and card_node.is_tapped: return
+	var mana_cost: String = str(ab.get("mana_cost", ""))
+	var life_cost: int = int(ab.get("life_cost", 0))
+	var sac_cost: bool = bool(ab.get("sac_cost", false))
+	var owner_id: int = get_card_owner_id(card_node)
+	if life_cost > 0 and int(player_life.get(owner_id, 0)) <= life_cost:
+		return
+	if not mana_cost.is_empty():
+		if not can_pay_and_drain_cost(mana_cost, owner_id, {"is_activated": true}):
+			return
+	if tap_cost and not card_node.is_tapped:
+		card_node.toggle_tap()
+		event_ledger.log_event(GameEventLedger.EventType.CARD_TAPPED, {"card_name": card_node.card_data.get("name", "")})
+	if life_cost > 0:
+		modify_life(owner_id, -life_cost)
+
+	var fixed_combo: Array = ab.get("fixed_combo", [])
+	var cols: Array = ab.get("colors", [])
+	var amt: int = int(ab.get("amount", 1))
+	var restriction: String = str(ab.get("restriction", ""))
+	var chosen_type: String = str(ab.get("chosen_type", ""))
+	var spawned_cols: Array = []
+
+	if not fixed_combo.is_empty():
+		for fc in fixed_combo:
+			var c_s := str(fc)
+			if restriction.is_empty():
+				mana_pool[c_s] += 1
+			else:
+				restricted_mana.append({"color": c_s, "restriction": restriction, "chosen_type": chosen_type})
+			spawned_cols.append(c_s)
+	else:
+		var c_pick := chosen_color if not chosen_color.is_empty() else (str(cols[0]) if not cols.is_empty() else "C")
+		for _i in range(amt):
+			if restriction.is_empty():
+				mana_pool[c_pick] += 1
+			else:
+				restricted_mana.append({"color": c_pick, "restriction": restriction, "chosen_type": chosen_type})
+			spawned_cols.append(c_pick)
+
+	if not spawned_cols.is_empty():
+		spawn_mana_produced_animation(card_node, spawned_cols)
+	if sac_cost and is_instance_valid(card_node):
+		zone_manager.move_to_graveyard(card_node)
+	EventBus.notify_mana(mana_pool)
+
+func _collect_deck_creature_types(pid: int) -> Array[String]:
+	var counts := {}
+	var pools: Array = []
+	if pid == local_player_id:
+		pools.append_array(hand_cards)
+		pools.append_array(library_stack)
+	else:
+		pools.append_array(player_hands.get(pid, []))
+		pools.append_array(player_libraries.get(pid, []))
+	for c in battlefield_non_lands:
+		if is_instance_valid(c) and get_card_owner_id(c) == pid: pools.append(c)
+	for c in pools:
+		if not is_instance_valid(c): continue
+		var tl := MagicRules.get_card_type_line(c.card_data)
+		if "—" in tl and "creature" in tl.to_lower():
+			var sub_part := tl.split("—")[1].strip_edges()
+			for t in sub_part.split(" "):
+				var clean_t := t.strip_edges()
+				if not clean_t.is_empty():
+					counts[clean_t] = int(counts.get(clean_t, 0)) + 1
+	var sorted_types: Array[String] = []
+	for k in counts.keys(): sorted_types.append(str(k))
+	sorted_types.sort_custom(func(a, b): return int(counts[a]) > int(counts[b]))
+	for common in ["Human", "Elf", "Goblin", "Zombie", "Wizard", "Dragon", "Soldier", "Spirit", "Vampire", "Angel", "Warrior", "Beast"]:
+		if not (common in sorted_types): sorted_types.append(common)
+	return sorted_types
+
+func _apply_etb_choice_replacements(card_node: Node3D, face_index: int = 0) -> void:
+	if not is_instance_valid(card_node): return
+	var oracle_lower := str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_index)).to_lower()
+	var owner_id: int = get_card_owner_id(card_node)
+	if "enters" in oracle_lower and "choose a creature type" in oracle_lower:
+		var types := _collect_deck_creature_types(owner_id)
+		if owner_id == local_player_id and hud_manager and hud_manager.has_method("open_etb_creature_type_popup"):
+			hud_manager.open_etb_creature_type_popup(card_node, types, func(chosen_t: String):
+				if is_instance_valid(card_node):
+					card_node.set_meta("chosen_creature_type", chosen_t)
+			)
+		elif not types.is_empty():
+			card_node.set_meta("chosen_creature_type", types[0])
+	if "enters" in oracle_lower and "choose a color" in oracle_lower:
+		if owner_id == local_player_id and hud_manager and hud_manager.has_method("open_choice_popup"):
+			hud_manager.open_choice_popup("CHOOSE A COLOR (%s)" % str(card_node.card_data.get("name", "Card")).to_upper(), ["White (W)", "Blue (U)", "Black (B)", "Red (R)", "Green (G)"], func(idx: int):
+				var cols := ["W", "U", "B", "R", "G"]
+				if is_instance_valid(card_node) and idx >= 0 and idx < cols.size():
+					card_node.set_meta("chosen_color", cols[idx])
+			)
+		else:
+			card_node.set_meta("chosen_color", "W")
+
 func _apply_etb_tapped_replacement(card_node: Node3D, face_index: int = 0) -> void:
 	var oracle_text := str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_index))
 	var parsed := OracleParser.parse_oracle_text(oracle_text)
@@ -1491,6 +1740,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 		card_node.is_on_battlefield = true
 		if card_node.collision_shape: card_node.collision_shape.disabled = false
 		_apply_etb_tapped_replacement(card_node, face_index)
+		_apply_etb_choice_replacements(card_node, face_index)
 
 		battlefield_lands.append(card_node)
 		EventBus.notify_etb(card_node, "Hand")
@@ -1519,7 +1769,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 			var final_mana_cost := ContinuousEffectsEngine.apply_cost_reduction(raw_mana_cost, red)
 			if add_life_amt > 0 and int(player_life.get(local_player_id, 0)) <= add_life_amt:
 				return
-			if not can_pay_and_drain_cost(final_mana_cost):
+			if not can_pay_and_drain_cost(final_mana_cost, local_player_id, {"type_line": type_line, "is_commander": card_node in command_zone_cards, "is_activated": false}):
 				if card_node.has_meta("chosen_target"): card_node.remove_meta("chosen_target")
 				return
 			if sac_node != null and is_instance_valid(sac_node):
@@ -1619,7 +1869,7 @@ func get_max_available_x(mana_cost_str: String, payer_id: int = local_player_id)
 			total_avail += 1
 	return maxi(0, (total_avail - non_x_cost) / x_count)
 
-func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_id) -> bool:
+func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_id, spell_context: Dictionary = {}) -> bool:
 	if mana_cost_str.is_empty() or mana_cost_str == "{}" or mana_cost_str == "0": return true
 
 	var colored_required := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
@@ -1642,7 +1892,20 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 
 	var active_pool: Dictionary = mana_pool if payer_id == local_player_id else {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
 	var temp_pool := active_pool.duplicate()
+	var used_restricted_indices: Array[int] = []
+
+	# First try matching restricted mana in pool for colored/colorless requirements
 	var missing_colored := colored_required.duplicate()
+	if payer_id == local_player_id:
+		for ri in range(restricted_mana.size()):
+			var rm: Dictionary = restricted_mana[ri]
+			if not _does_mana_match_context(str(rm.get("restriction", "")), str(rm.get("chosen_type", "")), spell_context):
+				continue
+			var rcol: String = str(rm.get("color", "C"))
+			if int(missing_colored.get(rcol, 0)) > 0:
+				missing_colored[rcol] -= 1
+				used_restricted_indices.append(ri)
+
 	for color in missing_colored.keys():
 		var available: int = min(int(missing_colored[color]), int(temp_pool[color]))
 		missing_colored[color] -= available
@@ -1651,79 +1914,136 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 	var missing_hybrid := []
 	for options in hybrid_requirements:
 		var paid := false
-		for opt in options:
-			if temp_pool[opt] > 0:
-				temp_pool[opt] -= 1; paid = true; break
+		if payer_id == local_player_id:
+			for ri in range(restricted_mana.size()):
+				if ri in used_restricted_indices: continue
+				var rm: Dictionary = restricted_mana[ri]
+				if not _does_mana_match_context(str(rm.get("restriction", "")), str(rm.get("chosen_type", "")), spell_context): continue
+				if str(rm.get("color", "")) in options:
+					used_restricted_indices.append(ri); paid = true; break
+		if not paid:
+			for opt in options:
+				if temp_pool[opt] > 0:
+					temp_pool[opt] -= 1; paid = true; break
 		if not paid: missing_hybrid.append(options)
+
+	var remaining_generic := generic_required
+	if payer_id == local_player_id:
+		for ri in range(restricted_mana.size()):
+			if remaining_generic <= 0: break
+			if ri in used_restricted_indices: continue
+			var rm: Dictionary = restricted_mana[ri]
+			if _does_mana_match_context(str(rm.get("restriction", "")), str(rm.get("chosen_type", "")), spell_context):
+				used_restricted_indices.append(ri)
+				remaining_generic -= 1
 
 	var total_temp_remaining := 0
 	for color in temp_pool.keys(): total_temp_remaining += int(temp_pool[color])
 
-	var missing_generic: int = generic_required - int(min(generic_required, total_temp_remaining))
+	var missing_generic: int = remaining_generic - int(min(remaining_generic, total_temp_remaining))
 	var total_missing: int = missing_hybrid.size() + missing_generic
 	for color in missing_colored.keys(): total_missing += int(missing_colored[color])
 
 	var cards_to_tap: Array[Node3D] = []
 	var tapped_card_colors := {}
 	var generated_mana_to_add := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
+	var total_life_cost := 0
 
 	if total_missing > 0:
-		var available_sources := []
+		var available_options := []
+		var cur_life: int = int(player_life.get(payer_id, 40))
 		for card in battlefield_lands + battlefield_non_lands:
 			if not is_instance_valid(card) or card.is_tapped: continue
-			if get_card_owner_id(card) != payer_id: continue
+			if get_card_controller_id(card) != payer_id: continue
 			var type_line := MagicRules.get_card_type_line(card.card_data).to_lower()
 			var has_haste: bool = card.has_method("has_keyword") and bool(card.has_keyword("haste"))
 			if "creature" in type_line and card.has_summoning_sickness and not has_haste: continue
-			var combined_text := MagicRules.get_card_combined_text(card.card_data).to_upper()
-			if "land" in type_line or "{T}: ADD" in combined_text or "ADD ONE MANA" in combined_text or "ADD " in combined_text:
-				var colors := MagicRules.get_land_colors(card.card_data)
-				if not colors.is_empty(): available_sources.append({"card": card, "colors": colors})
+			for ab in OracleParser.parse_mana_abilities(card.card_data, card):
+				if bool(ab.get("sac_cost", false)): continue
+				if not str(ab.get("mana_cost", "")).is_empty(): continue
+				var l_cost: int = int(ab.get("life_cost", 0))
+				if l_cost >= cur_life: continue
+				if not _does_mana_match_context(str(ab.get("restriction", "")), str(ab.get("chosen_type", "")), spell_context):
+					continue
+				var score: int = l_cost * 100 + ab.get("colors", []).size() * 10
+				if not str(ab.get("restriction", "")).is_empty(): score -= 5
+				available_options.append({"card": card, "ab": ab, "colors": ab.get("colors", []), "score": score})
 
-		if available_sources.size() < total_missing: return false
-		available_sources.sort_custom(func(a, b): return a["colors"].size() < b["colors"].size())
+		available_options.sort_custom(func(a, b): return int(a["score"]) < int(b["score"]))
 
 		var consume_source = func(valid_colors: Array) -> bool:
-			for i in range(available_sources.size()):
-				var src: Dictionary = available_sources[i]
+			for i in range(available_options.size()):
+				var opt_d: Dictionary = available_options[i]
+				var src_card: Node3D = opt_d["card"]
+				if src_card in cards_to_tap: continue
+				var ab: Dictionary = opt_d["ab"]
+				var ab_cols: Array = opt_d["colors"]
 				var chosen_color := ""
-				if valid_colors.is_empty(): chosen_color = src["colors"][0]
+				if valid_colors.is_empty(): chosen_color = str(ab_cols[0])
 				else:
 					for c in valid_colors:
-						if c in src["colors"]: chosen_color = c; break
+						if c in ab_cols: chosen_color = c; break
 				if not chosen_color.is_empty():
-					cards_to_tap.append(src["card"])
-					if not tapped_card_colors.has(src["card"]): tapped_card_colors[src["card"]] = []
-					tapped_card_colors[src["card"]].append(chosen_color)
-					generated_mana_to_add[chosen_color] += 1
-					available_sources.remove_at(i)
+					var l_c: int = int(ab.get("life_cost", 0))
+					if total_life_cost + l_c >= cur_life: continue
+					total_life_cost += l_c
+					cards_to_tap.append(src_card)
+					var combo: Array = ab.get("fixed_combo", [])
+					var amt: int = int(ab.get("amount", 1))
+					if not combo.is_empty():
+						tapped_card_colors[src_card] = combo.duplicate()
+						for fc in combo: generated_mana_to_add[str(fc)] += 1
+					else:
+						tapped_card_colors[src_card] = [chosen_color]
+						generated_mana_to_add[chosen_color] += amt
 					return true
 			return false
 
 		for color in missing_colored.keys():
 			while missing_colored[color] > 0:
-				if consume_source.call([color]): missing_colored[color] -= 1
+				if generated_mana_to_add[color] > colored_required[color] and int(temp_pool[color]) + generated_mana_to_add[color] > colored_required[color]:
+					missing_colored[color] -= 1
+				elif consume_source.call([color]):
+					missing_colored[color] -= 1
 				else: return false
 		for options in missing_hybrid:
 			if not consume_source.call(options): return false
-		var any_colors := ["W", "U", "B", "R", "G", "C"]
+		var any_colors := ["C", "W", "U", "B", "R", "G"]
 		while missing_generic > 0:
+			# Check if excess multi-mana from an already-tapped source (like Sol Ring) covers it
+			var surplus := 0
+			for c in generated_mana_to_add.keys():
+				surplus += maxi(0, generated_mana_to_add[c] - colored_required[c])
+			if surplus >= missing_generic:
+				missing_generic = 0
+				break
 			if consume_source.call(any_colors): missing_generic -= 1
 			else: return false
+
+	# Commit payments
+	if payer_id == local_player_id and not used_restricted_indices.is_empty():
+		used_restricted_indices.sort()
+		used_restricted_indices.reverse()
+		for ri in used_restricted_indices:
+			if ri >= 0 and ri < restricted_mana.size():
+				restricted_mana.remove_at(ri)
 
 	for card in cards_to_tap:
 		card.toggle_tap()
 		if tapped_card_colors.has(card): spawn_mana_produced_animation(card, tapped_card_colors[card])
+	if total_life_cost > 0:
+		modify_life(payer_id, -total_life_cost)
 	for color in generated_mana_to_add.keys(): active_pool[color] += generated_mana_to_add[color]
 	if not cards_to_tap.is_empty(): zone_manager.update_battlefield_positions(true)
 
-	for color in colored_required: active_pool[color] -= colored_required[color]
+	# Drain remaining colored/hybrid/generic from active_pool (restricted already accounted for above)
+	for color in colored_required:
+		var need: int = mini(int(colored_required[color]), int(active_pool[color]))
+		active_pool[color] -= need
 	for options in hybrid_requirements:
-		var paid := false
 		for opt in options:
-			if active_pool[opt] > 0: active_pool[opt] -= 1; paid = true; break
-		if not paid: active_pool[options[0]] -= 1
-	var remaining_to_pay := generic_required
+			if active_pool[opt] > 0: active_pool[opt] -= 1; break
+	var remaining_to_pay := remaining_generic
 	for color in ["C", "W", "U", "B", "R", "G"]:
 		while remaining_to_pay > 0 and active_pool[color] > 0:
 			active_pool[color] -= 1; remaining_to_pay -= 1
@@ -1842,6 +2162,7 @@ func is_modal_ui_open() -> bool:
 		if hud_manager.settings_canvas and is_instance_valid(hud_manager.settings_canvas): return true
 		if hud_manager.match_log_canvas and is_instance_valid(hud_manager.match_log_canvas): return true
 		if hud_manager.controller_help_canvas and is_instance_valid(hud_manager.controller_help_canvas): return true
+		if hud_manager.tracker_canvas and is_instance_valid(hud_manager.tracker_canvas): return true
 	for n_name in ["DeckSelectorUI", "ActivatedAbilitiesUI", "XStepperUI", "ModalChoiceUI", "ScrySurveilUI", "ManaPopupUI", "GenericChoiceUI", "FaceChoiceUI"]:
 		var n := get_node_or_null(n_name)
 		if n and is_instance_valid(n): return true
@@ -1988,6 +2309,10 @@ func _handle_joypad_button(btn_idx: int) -> void:
 				return
 			if hud_manager.settings_canvas and is_instance_valid(hud_manager.settings_canvas):
 				hud_manager.toggle_settings_menu()
+				vp.set_input_as_handled()
+				return
+			if hud_manager.tracker_canvas and is_instance_valid(hud_manager.tracker_canvas):
+				hud_manager.toggle_table_trackers()
 				vp.set_input_as_handled()
 				return
 			if hud_manager.match_log_canvas and is_instance_valid(hud_manager.match_log_canvas):
