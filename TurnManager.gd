@@ -106,7 +106,7 @@ func _schedule_paced_auto_pass() -> void:
 		if engine.mulligan_phase_active: return
 		if priority_player_id == engine.local_player_id and not has_local_player_interaction():
 			pass_priority()
-		elif auto_pass_opponents and priority_player_id != engine.local_player_id and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
+		elif auto_pass_opponents and not engine.is_human_seat(priority_player_id) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
 			pass_priority()
 	)
 
@@ -133,21 +133,30 @@ func request_pass_turn() -> void:
 	pass_until_end_step = true
 	pass_priority()
 
-func pass_priority() -> void:
+func get_active_player_count() -> int:
+	var cnt := 0
+	for p in CLOCKWISE_ORDER:
+		if not engine.has_method("is_player_eliminated") or not engine.is_player_eliminated(p):
+			cnt += 1
+	return maxi(1, cnt)
+
+func pass_priority(from_network: bool = false) -> void:
+	if not from_network and engine.is_network_multiplayer() and priority_player_id == engine.local_player_id:
+		engine.network_manager.dispatch_game_action("PASS_PRIORITY", {})
 	priority_passes_count += 1
 	engine.event_ledger.log_event(GameEventLedger.EventType.PRIORITY_PASSED, {
 		"passed_by": priority_player_id,
 		"passes_count": priority_passes_count
 	})
 
-	if priority_passes_count >= 4:
+	if priority_passes_count >= get_active_player_count():
 		priority_passes_count = 0
 		priority_player_id = active_player_id
 		if not engine.active_stack.is_empty():
 			engine.resolve_top_stack_card()
 			if engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id):
 				engine.ai_controller.schedule_ai_action(priority_player_id)
-			elif auto_pass_opponents and priority_player_id != engine.local_player_id:
+			elif auto_pass_opponents and not engine.is_human_seat(priority_player_id):
 				pass_priority()
 				return
 		else:
@@ -160,7 +169,7 @@ func pass_priority() -> void:
 		)
 		if engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id):
 			engine.ai_controller.schedule_ai_action(priority_player_id)
-		elif should_auto_pass_local or (auto_pass_opponents and priority_player_id != engine.local_player_id):
+		elif should_auto_pass_local or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
 			_schedule_paced_auto_pass()
 
 	EventBus.notify_priority(priority_player_id, priority_passes_count)
@@ -183,12 +192,12 @@ func advance_turn_phase(force_manual: bool = false) -> void:
 		var hit_end: bool = (current_turn_phase == TurnPhase.END and active_player_id == engine.local_player_id)
 		if hit_end or not engine.active_stack.is_empty() or bool(phase_stops.get(current_turn_phase, false)):
 			pass_until_end_step = false
-		elif not ai_will_act and (auto_pass_opponents or active_player_id == engine.local_player_id):
+		elif not ai_will_act and (auto_pass_opponents or engine.is_human_seat(active_player_id)):
 			_schedule_paced_auto_pass()
 
 	if ai_will_act:
 		engine.ai_controller.schedule_ai_action(priority_player_id)
-	elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (auto_pass_opponents and priority_player_id != engine.local_player_id):
+	elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
 		_schedule_paced_auto_pass()
 
 	EventBus.notify_phase(current_turn_phase)

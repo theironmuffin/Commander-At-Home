@@ -90,6 +90,7 @@ var zone_manager: ZoneManager
 var deck_loader: DeckLoader
 var ai_controller: AIController
 var sound_manager: SoundManager
+var network_manager: NetworkManager
 
 # Engine State
 var local_player_id: int = 1
@@ -182,6 +183,9 @@ func _ready() -> void:
 	deck_loader = DeckLoader.new(); add_child(deck_loader); deck_loader.setup(self)
 	ai_controller = AIController.new(); add_child(ai_controller); ai_controller.setup(self)
 	sound_manager = SoundManager.new(); add_child(sound_manager)
+	network_manager = NetworkManager.new(); add_child(network_manager); network_manager.setup(self)
+	network_manager.game_action_received.connect(_on_network_action_received)
+	network_manager.match_start_received.connect(_on_network_match_start)
 
 	setup_tabletop_layout()
 	var table_mesh: MeshInstance3D = $tableSurface
@@ -234,6 +238,19 @@ func reset_game_and_reselect_decks() -> void:
 		hud_manager.hide_card_preview()
 	get_tree().reload_current_scene()
 
+
+func set_inactive_players(inactive_pids: Array) -> void:
+	for pid_v in inactive_pids:
+		var pid := int(pid_v)
+		eliminated_players[pid] = true
+		player_life[pid] = 0
+		if command_info_stations.has(pid):
+			var r: Node3D = command_info_stations[pid].get("root", null)
+			if is_instance_valid(r): r.visible = false
+		if player_stations.has(pid):
+			var st: Node3D = player_stations[pid].get("station", null)
+			if is_instance_valid(st): st.visible = false
+
 func is_player_eliminated(pid: int) -> bool:
 	return bool(eliminated_players.get(pid, false))
 
@@ -279,17 +296,23 @@ func toggle_player_status(pid: int, status_name: String) -> void:
 	refresh_command_info_stations()
 	if hud_manager: hud_manager.update_phase_ui()
 
-func set_monarch(pid: int) -> void:
+func set_monarch(pid: int, from_network: bool = false) -> void:
+	if not from_network and is_network_multiplayer():
+		network_manager.dispatch_game_action("SET_MONARCH", {"pid": pid})
 	monarch_player_id = pid
 	refresh_command_info_stations()
 	if hud_manager: hud_manager.update_phase_ui()
 
-func set_initiative(pid: int) -> void:
+func set_initiative(pid: int, from_network: bool = false) -> void:
+	if not from_network and is_network_multiplayer():
+		network_manager.dispatch_game_action("SET_INITIATIVE", {"pid": pid})
 	initiative_player_id = pid
 	refresh_command_info_stations()
 	if hud_manager: hud_manager.update_phase_ui()
 
-func set_day_night(state_str: String) -> void:
+func set_day_night(state_str: String, from_network: bool = false) -> void:
+	if not from_network and is_network_multiplayer():
+		network_manager.dispatch_game_action("SET_DAY_NIGHT", {"state": state_str})
 	battlefield_day_night = state_str
 	if hud_manager: hud_manager.update_phase_ui()
 
@@ -641,7 +664,7 @@ func _setup_command_info_stations() -> void:
 		life_lbl.font_size = 56
 		life_lbl.outline_size = 14
 		life_lbl.pixel_size = 0.0028
-		life_lbl.modulate = Color(0.45, 0.95, 0.45, 1.0) if pid == local_player_id else Color(1.0, 1.0, 1.0, 1.0)
+		life_lbl.modulate = Color(1.0, 1.0, 1.0, 1.0)
 		root.add_child(life_lbl)
 
 		var cmd_lbl := Label3D.new()
@@ -711,7 +734,7 @@ func refresh_command_info_stations() -> void:
 			if cur_life <= 0:
 				life_lbl.modulate = Color(0.95, 0.3, 0.3, 1.0)
 			else:
-				life_lbl.modulate = Color(0.45, 0.95, 0.45, 1.0) if pid == local_player_id else Color(1.0, 1.0, 1.0, 1.0)
+				life_lbl.modulate = Color(1.0, 1.0, 1.0, 1.0)
 		if is_instance_valid(cmd_lbl):
 			var cmd_map: Dictionary = commander_damage.get(pid, {})
 			var parts: Array[String] = []
@@ -852,7 +875,9 @@ func update_hand_positions(anim: bool = false) -> void: zone_manager.update_hand
 func update_mana_ui() -> void: hud_manager.update_mana_ui()
 func show_mana_choice_popup(card_node: Node3D, colors: Array) -> void: hud_manager.show_mana_choice_popup(card_node, colors)
 
-func modify_life(player_id: int, amount: int) -> void:
+func modify_life(player_id: int, amount: int, from_network: bool = false) -> void:
+	if not from_network and is_network_multiplayer() and player_id == local_player_id:
+		network_manager.dispatch_game_action("MODIFY_LIFE", {"pid": player_id, "delta": amount})
 	player_life[player_id] += amount
 	event_ledger.log_event(GameEventLedger.EventType.LIFE_CHANGED, {"player_id": player_id, "delta": amount, "new_life": player_life[player_id]})
 	EventBus.notify_life_change(player_id, player_life[player_id], amount)
@@ -2567,3 +2592,32 @@ func close_top_modal_or_cancel() -> void:
 		if is_instance_valid(combat_manager.selected_blocker) and combat_manager.selected_blocker.has_method("set_highlight"):
 			combat_manager.selected_blocker.set_highlight(false)
 		combat_manager.selected_blocker = null
+
+
+func is_network_multiplayer() -> bool:
+	return network_manager != null and network_manager.is_network_active()
+
+func is_human_seat(pid: int) -> bool:
+	if is_network_multiplayer():
+		return network_manager.is_seat_human(pid)
+	return pid == local_player_id
+
+func _on_network_match_start(_seed_val: int, starting_pid: int, seat_decks: Dictionary) -> void:
+	starting_player_id = starting_pid
+	local_player_id = network_manager.get_local_seat_id()
+	if deck_loader and deck_loader.has_method("load_and_spawn_network_decks"):
+		deck_loader.load_and_spawn_network_decks(seat_decks)
+
+func _on_network_action_received(sender_seat: int, action_type: String, payload: Dictionary) -> void:
+	match action_type:
+		"PASS_PRIORITY":
+			if turn_manager.priority_player_id == sender_seat:
+				turn_manager.pass_priority(true)
+		"MODIFY_LIFE":
+			modify_life(int(payload.get("pid", sender_seat)), int(payload.get("delta", 0)), true)
+		"SET_MONARCH":
+			set_monarch(int(payload.get("pid", sender_seat)), true)
+		"SET_INITIATIVE":
+			set_initiative(int(payload.get("pid", sender_seat)), true)
+		"SET_DAY_NIGHT":
+			set_day_night(str(payload.get("state", "")), true)

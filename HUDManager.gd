@@ -8,6 +8,7 @@ var life_name_labels: Dictionary = {}
 var cmd_dmg_labels: Dictionary = {}
 var match_log_canvas: CanvasLayer = null
 var settings_canvas: CanvasLayer = null
+var lobby_canvas: CanvasLayer = null
 var touch_bar_canvas: CanvasLayer = null
 var touch_atk_btn: Button = null
 var touch_controls_enabled: bool = false
@@ -193,6 +194,29 @@ func setup_touch_action_bar() -> void:
 		open_zone_viewer("%s's Exile" % engine.get_player_display_name(engine.local_player_id), engine.exile_stack, engine.local_player_id)
 	)
 	hbox.add_child(ex_btn)
+
+	var lib_btn := Button.new()
+	lib_btn.text = "📖 Lib"
+	lib_btn.custom_minimum_size = Vector2(78, 48)
+	lib_btn.pressed.connect(func():
+		open_zone_viewer("Library (Tutor)", engine.library_stack)
+	)
+	hbox.add_child(lib_btn)
+
+	var untap_btn := Button.new()
+	untap_btn.text = "↺ Untap"
+	untap_btn.custom_minimum_size = Vector2(88, 48)
+	untap_btn.pressed.connect(func():
+		if engine.turn_manager.is_local_player_turn():
+			engine.zone_manager.untap_all(engine.local_player_id)
+	)
+	hbox.add_child(untap_btn)
+
+	var trk_btn := Button.new()
+	trk_btn.text = "🎲 Track"
+	trk_btn.custom_minimum_size = Vector2(88, 48)
+	trk_btn.pressed.connect(func(): toggle_table_trackers())
+	hbox.add_child(trk_btn)
 
 	var cam_btn := Button.new()
 	cam_btn.text = "📷 Cam"
@@ -1537,6 +1561,7 @@ func open_choice_popup(title_text: String, choice_labels: Array, on_chosen: Call
 	var popup := Control.new()
 	popup.name = "GenericChoiceUI"
 	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
 
 	var bg_overlay := ColorRect.new()
@@ -1700,6 +1725,7 @@ func show_mana_choice_popup(card_node: Node3D, colors: Array) -> void:
 func show_mana_ability_popup(card_node: Node3D, abilities: Array[Dictionary]) -> void:
 	var popup := CanvasLayer.new()
 	popup.layer = 100
+	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
 
 	var center := CenterContainer.new()
@@ -1805,6 +1831,7 @@ func show_mana_ability_popup(card_node: Node3D, abilities: Array[Dictionary]) ->
 func open_etb_creature_type_popup(card_node: Node3D, candidate_types: Array[String], callback: Callable) -> void:
 	var popup := CanvasLayer.new()
 	popup.layer = 105
+	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
 
 	var center := CenterContainer.new()
@@ -1927,6 +1954,7 @@ func open_x_stepper_popup(card_name: String, mana_cost: String, max_x: int, on_c
 	var popup := Control.new()
 	popup.name = "XStepperUI"
 	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
 
 	var bg := ColorRect.new()
@@ -2027,6 +2055,7 @@ func open_modal_choice_popup(card_name: String, choose_count: int, allow_repeat:
 	var popup := Control.new()
 	popup.name = "ModalChoiceUI"
 	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
 
 	var bg := ColorRect.new()
@@ -2344,6 +2373,15 @@ func toggle_settings_menu() -> void:
 		setup_touch_action_bar()
 	)
 	vbox.add_child(touch_btn)
+
+	var mp_btn := Button.new()
+	mp_btn.text = "🌐 P2P Multiplayer Lobby"
+	mp_btn.custom_minimum_size = Vector2(0, 42)
+	mp_btn.pressed.connect(func():
+		toggle_settings_menu()
+		open_multiplayer_lobby()
+	)
+	vbox.add_child(mp_btn)
 
 	var spd_btn := Button.new()
 	var _spd_label := func() -> String:
@@ -2678,3 +2716,126 @@ func show_turn_banner(pid: int, turn_num: int) -> void:
 		var c := instance_from_id(c_id)
 		if c and is_instance_valid(c): c.queue_free()
 	)
+
+
+func open_multiplayer_lobby() -> void:
+	if lobby_canvas and is_instance_valid(lobby_canvas):
+		lobby_canvas.queue_free()
+		lobby_canvas = null
+		return
+
+	lobby_canvas = CanvasLayer.new()
+	lobby_canvas.name = "MultiplayerLobbyUI"
+	lobby_canvas.layer = 125
+	engine.add_child(lobby_canvas)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.78)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lobby_canvas.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lobby_canvas.add_child(center)
+
+	var panel := PanelContainer.new()
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	panel.custom_minimum_size = Vector2(minf(540.0, vp_sz.x - 24.0), 0)
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "P2P 4-PLAYER LOBBY (ENET)"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
+	vbox.add_child(title)
+
+	var nm: NetworkManager = engine.network_manager
+	var status_lbl := Label.new()
+	status_lbl.text = "Status: %s" % ("Host / Connected" if (nm and nm.is_network_active()) else "Offline (Solo / AI Mode)")
+	status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_lbl.add_theme_font_size_override("font_size", 13)
+	status_lbl.add_theme_color_override("font_color", Color(0.65, 0.9, 1.0, 1.0))
+	vbox.add_child(status_lbl)
+
+	var seats_lbl := Label.new()
+	seats_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	seats_lbl.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(seats_lbl)
+
+	var refresh_seats := func():
+		if not is_instance_valid(seats_lbl) or not nm: return
+		var parts: Array[String] = []
+		for s in [1, 2, 3, 4]:
+			if nm.seat_to_peer.has(s):
+				parts.append("Seat %d: %s" % [s, str(nm.seat_names.get(s, "Human"))])
+			else:
+				parts.append("Seat %d: AI Bot" % s)
+		seats_lbl.text = "\n".join(parts)
+	refresh_seats.call()
+
+	if nm:
+		nm.lobby_updated.connect(refresh_seats)
+		nm.connection_status_changed.connect(func(txt: String, _ok: bool):
+			if is_instance_valid(status_lbl): status_lbl.text = "Status: " + txt
+		)
+
+	vbox.add_child(HSeparator.new())
+
+	var host_row := HBoxContainer.new()
+	host_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(host_row)
+	var port_in := LineEdit.new()
+	port_in.text = str(NetworkManager.DEFAULT_PORT)
+	port_in.placeholder_text = "Port (7777)"
+	port_in.custom_minimum_size = Vector2(110, 40)
+	host_row.add_child(port_in)
+	var host_btn := Button.new()
+	host_btn.text = "Host Game"
+	host_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	host_btn.custom_minimum_size = Vector2(0, 40)
+	host_btn.pressed.connect(func():
+		if nm: nm.host_game(int(port_in.text) if port_in.text.is_valid_int() else NetworkManager.DEFAULT_PORT)
+	)
+	host_row.add_child(host_btn)
+
+	var join_row := HBoxContainer.new()
+	join_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(join_row)
+	var ip_in := LineEdit.new()
+	ip_in.placeholder_text = "Host IP (e.g. 192.168.1.50)"
+	ip_in.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ip_in.custom_minimum_size = Vector2(0, 40)
+	join_row.add_child(ip_in)
+	var join_btn := Button.new()
+	join_btn.text = "Join Game"
+	join_btn.custom_minimum_size = Vector2(120, 40)
+	join_btn.pressed.connect(func():
+		if nm: nm.join_game(ip_in.text, int(port_in.text) if port_in.text.is_valid_int() else NetworkManager.DEFAULT_PORT)
+	)
+	join_row.add_child(join_btn)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 10)
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_child(btn_row)
+
+	var disc_btn := Button.new()
+	disc_btn.text = "Disconnect / Solo"
+	disc_btn.custom_minimum_size = Vector2(160, 40)
+	disc_btn.pressed.connect(func():
+		if nm: nm.disconnect_game()
+	)
+	btn_row.add_child(disc_btn)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.custom_minimum_size = Vector2(120, 40)
+	close_btn.pressed.connect(func(): open_multiplayer_lobby())
+	btn_row.add_child(close_btn)
+
+	apply_custom_font(lobby_canvas)

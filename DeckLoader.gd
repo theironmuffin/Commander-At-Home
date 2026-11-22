@@ -124,6 +124,7 @@ func show_deck_selector_ui() -> void:
 	vbox.add_child(HSeparator.new())
 
 	var player_dropdowns := {}
+	var player_active_flags := {1: true, 2: true, 3: true, 4: true}
 	var player_names := {1: "Player 1 (You)", 2: "Player 2 (Left)", 3: "Player 3 (Across)", 4: "Player 4 (Right)"}
 
 	var populate_all_dropdowns = func():
@@ -176,9 +177,15 @@ func show_deck_selector_ui() -> void:
 		hbox.add_theme_constant_override("separation", 15)
 		vbox.add_child(hbox)
 
+		var active_toggle := Button.new()
+		active_toggle.text = "ON"
+		active_toggle.custom_minimum_size = Vector2(46, 40)
+		active_toggle.disabled = (i == 1)
+		hbox.add_child(active_toggle)
+
 		var lbl := Label.new()
 		lbl.text = player_names[i]
-		lbl.custom_minimum_size = Vector2(140, 0)
+		lbl.custom_minimum_size = Vector2(130, 0)
 		hbox.add_child(lbl)
 
 		var prev_btn := Button.new()
@@ -247,6 +254,17 @@ func show_deck_selector_ui() -> void:
 				engine.set_player_sleeve(pid_cap, "")
 			sleeve_btn.text = "Sleeve: Default"
 		)
+		active_toggle.pressed.connect(func():
+			var next_on := not bool(player_active_flags.get(pid_cap, true))
+			player_active_flags[pid_cap] = next_on
+			active_toggle.text = "ON" if next_on else "OFF"
+			prev_btn.disabled = not next_on
+			option_btn.disabled = not next_on
+			next_btn.disabled = not next_on
+			sleeve_btn.disabled = not next_on
+			sleeve_rst.disabled = not next_on
+			lbl.modulate = Color(1, 1, 1, 1) if next_on else Color(0.45, 0.45, 0.5, 0.65)
+		)
 
 	populate_all_dropdowns.call()
 
@@ -304,15 +322,33 @@ func show_deck_selector_ui() -> void:
 	load_btn.add_theme_stylebox_override("hover", start_btn_style)
 	vbox.add_child(load_btn)
 
+	var mp_lobby_btn := Button.new()
+	mp_lobby_btn.text = "🌐 P2P MULTIPLAYER LOBBY (HOST / JOIN)"
+	mp_lobby_btn.custom_minimum_size = Vector2(0, 38)
+	mp_lobby_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	mp_lobby_btn.add_theme_stylebox_override("hover", pill_btn_style)
+	mp_lobby_btn.pressed.connect(func():
+		if engine.hud_manager and engine.hud_manager.has_method("open_multiplayer_lobby"):
+			engine.hud_manager.open_multiplayer_lobby()
+	)
+	vbox.add_child(mp_lobby_btn)
+
 	load_btn.pressed.connect(func():
 		var selections := {}
+		var inactive_pids: Array[int] = []
 		for i in range(1, 5):
+			if not bool(player_active_flags.get(i, true)):
+				inactive_pids.append(i)
+				continue
 			var opt: OptionButton = player_dropdowns[i]
 			selections[i] = opt.get_item_metadata(opt.selected) if opt.get_item_count() > 0 and opt.selected >= 0 else opt.get_item_metadata(0)
+		var active_keys: Array = selections.keys()
 		var chosen_first: int = int(first_opt.get_item_metadata(first_opt.selected))
-		if chosen_first == 0:
-			chosen_first = TurnManager.CLOCKWISE_ORDER[randi() % TurnManager.CLOCKWISE_ORDER.size()]
+		if chosen_first == 0 or not (chosen_first in active_keys):
+			chosen_first = int(active_keys[randi() % active_keys.size()]) if not active_keys.is_empty() else 1
 		engine.starting_player_id = chosen_first
+		if engine.has_method("set_inactive_players"):
+			engine.set_inactive_players(inactive_pids)
 		canvas.queue_free()
 		load_and_spawn_all_decks(selections)
 	)
@@ -330,7 +366,7 @@ func import_deck_from_url_multi(url: String, line_edit: LineEdit, import_btn: Bu
 	engine.add_child(http)
 	var http_id := http.get_instance_id()
 	var headers := [
-		"User-Agent: Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+		"User-Agent: MTGBrawlSim/1.0",
 		"Accept: application/json"
 	]
 
@@ -353,18 +389,38 @@ func import_deck_from_url_multi(url: String, line_edit: LineEdit, import_btn: Bu
 		var parts := clean_url.split("moxfield.com/decks/")
 		if parts.size() > 1:
 			var deck_id := parts[1].split("#")[0].split("?")[0].split("/")[0].strip_edges()
+			var mox_headers := headers.duplicate()
 			var api_url := "https://api2.moxfield.com/v2/decks/all/%s" % deck_id
 			http.request_completed.connect(func(res, code, _hdr, body):
+				if code == 403:
+					# Retry v3 endpoint once in case v2 is rate-limited/blocked
+					var req2 := HTTPRequest.new()
+					req2.use_threads = true
+					req2.timeout = 15.0
+					engine.add_child(req2)
+					var req2_id := req2.get_instance_id()
+					var old_req := instance_from_id(http_id)
+					if old_req and is_instance_valid(old_req): old_req.queue_free()
+					req2.request_completed.connect(func(r2, c2, _h2, b2):
+						_on_moxfield_loaded_multi(r2, c2, b2, deck_id, line_edit, import_btn, refresh_callback, req2_id)
+					)
+					req2.request("https://api2.moxfield.com/v3/decks/all/%s" % deck_id, mox_headers)
+					return
 				_on_moxfield_loaded_multi(res, code, body, deck_id, line_edit, import_btn, refresh_callback, http_id)
 			)
-			var err := http.request(api_url, headers)
+			var err := http.request(api_url, mox_headers)
 			if err != OK:
 				import_btn.text = "ERR %d" % err
 				import_btn.disabled = false
 				http.queue_free()
 			return
 
-	line_edit.text = "Invalid URL."
+	elif "\n" in clean_url or clean_url.begins_with("1 ") or clean_url.begins_with("1x "):
+		http.queue_free()
+		_import_plain_text_decklist(clean_url, line_edit, import_btn, refresh_callback)
+		return
+
+	line_edit.text = "Invalid URL or Decklist."
 	import_btn.disabled = false
 	import_btn.text = "IMPORT"
 	http.queue_free()
@@ -740,3 +796,63 @@ func _pump_prefetch_queue() -> void:
 			_pump_prefetch_queue()
 		)
 		http.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])
+
+
+func load_and_spawn_network_decks(seat_decks: Dictionary) -> void:
+	var cache := _load_deck_cache()
+	var temp_key_map := {}
+	for pid in seat_decks.keys():
+		var k := "net_seat_%d" % int(pid)
+		cache[k] = seat_decks[pid]
+		temp_key_map[int(pid)] = k
+	_save_deck_cache(cache)
+	load_and_spawn_all_decks(temp_key_map)
+
+
+func _import_plain_text_decklist(raw_text: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable) -> void:
+	var cards_array := []
+	var commander := ""
+	var in_cmd_section := false
+	var line_rx := RegEx.new()
+	line_rx.compile("^(\\d+)x?\\s+([^(\\r\\n]+?)(?:\\s+\\(([A-Za-z0-9]+)\\)\\s+(\\S+))?(?:\\s+\\*([FE])\\*)?$")
+	for raw_line in raw_text.split("\n"):
+		var l := raw_line.strip_edges()
+		if l.is_empty(): continue
+		var lower := l.to_lower()
+		if lower.begins_with("commander"):
+			in_cmd_section = true
+			continue
+		if lower.begins_with("deck") or lower.begins_with("mainboard") or lower.begins_with("sideboard"):
+			in_cmd_section = false
+			continue
+		var m := line_rx.search(l)
+		if m:
+			var qty := m.get_string(1).to_int()
+			var c_name := m.get_string(2).strip_edges()
+			var s_set := m.get_string(3).strip_edges().to_lower()
+			var s_cn := m.get_string(4).strip_edges()
+			var foil_tag := m.get_string(5).strip_edges().to_upper()
+			var entry := {"name": c_name, "quantity": qty}
+			if not s_set.is_empty(): entry["set"] = s_set
+			if not s_cn.is_empty(): entry["collector_number"] = s_cn
+			if foil_tag == "F" or foil_tag == "E": entry["is_foil"] = true
+			cards_array.append(entry)
+			if in_cmd_section:
+				commander = c_name if commander.is_empty() else (commander + " | " + c_name)
+	if cards_array.is_empty():
+		if is_instance_valid(import_btn):
+			import_btn.text = "EMPTY LIST"
+			import_btn.disabled = false
+		return
+	if commander.is_empty():
+		commander = str(cards_array[0].get("name", ""))
+	var deck_name := "Imported (%s)" % commander.split(" | ")[0]
+	var cache_key := "text_" + str(Time.get_unix_time_from_system())
+	var cache := _load_deck_cache()
+	cache[cache_key] = {"deckName": deck_name, "commander": commander, "cards": cards_array}
+	_save_deck_cache(cache)
+	if refresh_callback.is_valid(): refresh_callback.call()
+	if is_instance_valid(line_edit): line_edit.text = ""
+	if is_instance_valid(import_btn):
+		import_btn.text = "IMPORT"
+		import_btn.disabled = false

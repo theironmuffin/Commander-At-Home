@@ -11,7 +11,7 @@ func setup(main_engine: Node) -> void:
 func should_ai_act_on_priority(pid: int) -> bool:
 	if not engine or not engine.turn_manager.auto_pass_opponents:
 		return false
-	if pid == engine.local_player_id:
+	if engine.is_human_seat(pid):
 		return false
 	var tm: TurnManager = engine.turn_manager
 	if not engine.active_stack.is_empty():
@@ -137,7 +137,16 @@ func _run_ai_main_phase(pid: int) -> void:
 		var raw_cost: String = engine.get_taxed_mana_cost(card) if (card in engine.player_command_zones.get(pid, [])) else str(card.card_data.get("mana_cost", ""))
 		var red := ContinuousEffectsEngine.get_cost_reduction(card.card_data, pid, engine.battlefield_lands, engine.battlefield_non_lands)
 		var mana_cost := ContinuousEffectsEngine.apply_cost_reduction(raw_cost, red)
-		if engine.can_pay_and_drain_cost(mana_cost, pid):
+		var x_count := OracleParser.count_x_in_mana_cost(mana_cost)
+		if x_count > 0:
+			var max_x: int = engine.get_max_available_x(mana_cost, pid)
+			if max_x <= 0:
+				continue
+			card.set_meta("chosen_x", max_x)
+			mana_cost = mana_cost.replace("{X}", "").replace("{x}", "")
+			if max_x * x_count > 0:
+				mana_cost = "{%d}%s" % [max_x * x_count, mana_cost]
+		if engine.can_pay_and_drain_cost(mana_cost, pid, {"type_line": type_line, "is_commander": card in engine.player_command_zones.get(pid, []), "is_activated": false}):
 			if card.has_method("make_active"):
 				card.make_active(card.card_data)
 			if card in engine.player_command_zones.get(pid, []):
@@ -252,7 +261,7 @@ func _run_ai_attackers(pid: int) -> void:
 func assign_ai_blockers() -> void:
 	var active_pid: int = engine.turn_manager.active_player_id
 	for pid in [1, 2, 3, 4]:
-		if pid == active_pid or pid == engine.local_player_id: continue
+		if pid == active_pid or engine.is_human_seat(pid): continue
 
 		var incoming: Array[Node3D] = []
 		for card in engine.battlefield_non_lands:
