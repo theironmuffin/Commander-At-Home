@@ -17,13 +17,14 @@ config/icon="res://icon.svg"
 
 [autoload]
 
-CardManager="*uid://bdkl36bg2soaq"
 EventBus="*uid://2eil3g52qti4"
+CardManager="*uid://3ghl483c2rn0"
 
 [display]
 
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+window/handheld/orientation=4
 
 [physics]
 
@@ -34,3 +35,4 @@ window/stretch/aspect="expand"
 rendering_device/driver.windows="d3d12"
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+textures/vram_compression/import_etc2_astc=true

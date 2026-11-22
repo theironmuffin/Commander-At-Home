@@ -6,6 +6,29 @@ var _prefetch_urls: Array[String] = []
 var _prefetch_in_flight: int = 0
 var _pending_deck_loads: int = 0
 var _total_deck_loads: int = 0
+const MOBILE_DECK_CACHE_PATH = "user://deck_cache.json"
+
+func _load_deck_cache() -> Dictionary:
+	var merged := {}
+	var cm_cache = CardManager.load_cache_from_disk()
+	if cm_cache is Dictionary:
+		merged = cm_cache.duplicate(true)
+	if FileAccess.file_exists(MOBILE_DECK_CACHE_PATH):
+		var f := FileAccess.open(MOBILE_DECK_CACHE_PATH, FileAccess.READ)
+		if f:
+			var json := JSON.new()
+			if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
+				var u_cache: Dictionary = json.get_data()
+				for k in u_cache.keys():
+					if not merged.has(k):
+						merged[k] = u_cache[k]
+	return merged
+
+func _save_deck_cache(cache: Dictionary) -> void:
+	CardManager.save_cache_to_disk(cache)
+	var f := FileAccess.open(MOBILE_DECK_CACHE_PATH, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(cache))
 
 func setup(main_engine: Node) -> void:
 	engine = main_engine
@@ -25,7 +48,8 @@ func show_deck_selector_ui() -> void:
 	canvas.add_child(center_container)
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(780, 640)
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	panel.custom_minimum_size = Vector2(minf(780.0, vp_sz.x - 24.0), minf(640.0, vp_sz.y - 24.0))
 	var panel_style := StyleBoxFlat.new()
 	panel_style.bg_color = Color(0.1, 0.11, 0.14, 0.98); panel_style.border_color = Color(0.85, 0.7, 0.35, 0.9); panel_style.set_border_width_all(2)
 	panel_style.corner_radius_top_left = 14; panel_style.corner_radius_top_right = 14; panel_style.corner_radius_bottom_left = 14; panel_style.corner_radius_bottom_right = 14
@@ -103,7 +127,7 @@ func show_deck_selector_ui() -> void:
 	var player_names := {1: "Player 1 (You)", 2: "Player 2 (Left)", 3: "Player 3 (Across)", 4: "Player 4 (Right)"}
 
 	var populate_all_dropdowns = func():
-		var cache := CardManager.load_cache_from_disk()
+		var cache := _load_deck_cache()
 		var all_opts: Array = [manage_opt]
 		for pid in player_dropdowns.keys():
 			all_opts.append(player_dropdowns[pid])
@@ -140,10 +164,10 @@ func show_deck_selector_ui() -> void:
 		if manage_opt.get_item_count() == 0 or manage_opt.selected < 0: return
 		var key_to_remove = manage_opt.get_item_metadata(manage_opt.selected)
 		if key_to_remove == null: return
-		var cache := CardManager.load_cache_from_disk()
+		var cache := _load_deck_cache()
 		if cache.has(key_to_remove):
 			cache.erase(key_to_remove)
-			CardManager.save_cache_to_disk(cache)
+			_save_deck_cache(cache)
 			populate_all_dropdowns.call()
 	)
 
@@ -200,6 +224,8 @@ func show_deck_selector_ui() -> void:
 
 		var pid_cap := i
 		sleeve_btn.pressed.connect(func():
+			if OS.get_name() == "Android":
+				OS.request_permissions()
 			var fd := FileDialog.new()
 			fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 			fd.access = FileDialog.ACCESS_FILESYSTEM
@@ -294,33 +320,48 @@ func show_deck_selector_ui() -> void:
 	engine.hud_manager.apply_custom_font(canvas)
 
 func import_deck_from_url_multi(url: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable) -> void:
+	var clean_url := url.strip_edges()
 	import_btn.disabled = true
 	import_btn.text = "FETCHING..."
 
 	var http := HTTPRequest.new()
+	http.use_threads = true
+	http.timeout = 15.0
 	engine.add_child(http)
 	var http_id := http.get_instance_id()
+	var headers := [
+		"User-Agent: Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+		"Accept: application/json"
+	]
 
-	if "archidekt.com/decks/" in url:
-		var parts := url.split("archidekt.com/decks/")
+	if "archidekt.com/decks/" in clean_url:
+		var parts := clean_url.split("archidekt.com/decks/")
 		if parts.size() > 1:
-			var deck_id := parts[1].split("/")[0].split("?")[0]
+			var deck_id := parts[1].split("#")[0].split("?")[0].split("/")[0].strip_edges()
 			var api_url := "https://archidekt.com/api/decks/%s/" % deck_id
-			http.request_completed.connect(func(_res, code, _hdr, body):
-				_on_archidekt_loaded_multi(code, body, deck_id, line_edit, import_btn, refresh_callback, http_id)
+			http.request_completed.connect(func(res, code, _hdr, body):
+				_on_archidekt_loaded_multi(res, code, body, deck_id, line_edit, import_btn, refresh_callback, http_id)
 			)
-			http.request(api_url, ["User-Agent: MTGBrawlSim/1.0", "Accept: application/json"])
+			var err := http.request(api_url, headers)
+			if err != OK:
+				import_btn.text = "ERR %d" % err
+				import_btn.disabled = false
+				http.queue_free()
 			return
 
-	elif "moxfield.com/decks/" in url:
-		var parts := url.split("moxfield.com/decks/")
+	elif "moxfield.com/decks/" in clean_url:
+		var parts := clean_url.split("moxfield.com/decks/")
 		if parts.size() > 1:
-			var deck_id := parts[1].split("/")[0].split("?")[0]
+			var deck_id := parts[1].split("#")[0].split("?")[0].split("/")[0].strip_edges()
 			var api_url := "https://api2.moxfield.com/v2/decks/all/%s" % deck_id
-			http.request_completed.connect(func(_res, code, _hdr, body):
-				_on_moxfield_loaded_multi(code, body, deck_id, line_edit, import_btn, refresh_callback, http_id)
+			http.request_completed.connect(func(res, code, _hdr, body):
+				_on_moxfield_loaded_multi(res, code, body, deck_id, line_edit, import_btn, refresh_callback, http_id)
 			)
-			http.request(api_url, ["User-Agent: MTGBrawlSim/1.0", "Accept: application/json"])
+			var err := http.request(api_url, headers)
+			if err != OK:
+				import_btn.text = "ERR %d" % err
+				import_btn.disabled = false
+				http.queue_free()
 			return
 
 	line_edit.text = "Invalid URL."
@@ -328,17 +369,17 @@ func import_deck_from_url_multi(url: String, line_edit: LineEdit, import_btn: Bu
 	import_btn.text = "IMPORT"
 	http.queue_free()
 
-func _on_archidekt_loaded_multi(code: int, body: PackedByteArray, deck_id: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable, http_id: int) -> void:
+func _on_archidekt_loaded_multi(res: int, code: int, body: PackedByteArray, deck_id: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable, http_id: int) -> void:
 	var req := instance_from_id(http_id)
 	if req and is_instance_valid(req): req.queue_free()
-	if code != 200:
+	if res != HTTPRequest.RESULT_SUCCESS or code != 200:
 		if is_instance_valid(import_btn):
-			import_btn.text = "ERROR"
+			import_btn.text = "NO NET/PERM" if code == 0 else ("ERR %d" % code)
 			import_btn.disabled = false
 		return
 
 	var json := JSON.new()
-	if json.parse(body.get_string_from_utf8()) == OK:
+	if json.parse(body.get_string_from_utf8()) == OK and json.get_data() is Dictionary:
 		var data: Dictionary = json.get_data()
 		var deck_name: String = data.get("name", "Archidekt Deck")
 		var cards_array := []
@@ -364,28 +405,34 @@ func _on_archidekt_loaded_multi(code: int, body: PackedByteArray, deck_id: Strin
 			cards_array.append(entry)
 
 		var cache_key := "archidekt_" + deck_id
-		var cache := CardManager.load_cache_from_disk()
+		var cache := _load_deck_cache()
 		cache[cache_key] = {"deckName": deck_name, "commander": commander, "cards": cards_array}
-		CardManager.save_cache_to_disk(cache)
+		_save_deck_cache(cache)
 
 		if refresh_callback.is_valid(): refresh_callback.call()
 		if is_instance_valid(line_edit): line_edit.text = ""
+
+	else:
+		if is_instance_valid(import_btn):
+			import_btn.text = "BAD JSON"
+			import_btn.disabled = false
+		return
 
 	if is_instance_valid(import_btn):
 		import_btn.text = "IMPORT"
 		import_btn.disabled = false
 
-func _on_moxfield_loaded_multi(code: int, body: PackedByteArray, deck_id: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable, http_id: int) -> void:
+func _on_moxfield_loaded_multi(res: int, code: int, body: PackedByteArray, deck_id: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable, http_id: int) -> void:
 	var req := instance_from_id(http_id)
 	if req and is_instance_valid(req): req.queue_free()
-	if code != 200:
+	if res != HTTPRequest.RESULT_SUCCESS or code != 200:
 		if is_instance_valid(import_btn):
-			import_btn.text = "ERROR"
+			import_btn.text = "NO NET/PERM" if code == 0 else ("ERR %d" % code)
 			import_btn.disabled = false
 		return
 
 	var json := JSON.new()
-	if json.parse(body.get_string_from_utf8()) == OK:
+	if json.parse(body.get_string_from_utf8()) == OK and json.get_data() is Dictionary:
 		var data: Dictionary = json.get_data()
 		var deck_name: String = data.get("name", "Moxfield Deck")
 		var cards_array := []
@@ -421,12 +468,18 @@ func _on_moxfield_loaded_multi(code: int, body: PackedByteArray, deck_id: String
 			cards_array.append(entry)
 
 		var cache_key := "moxfield_" + deck_id
-		var cache := CardManager.load_cache_from_disk()
+		var cache := _load_deck_cache()
 		cache[cache_key] = {"deckName": deck_name, "commander": commander, "cards": cards_array}
-		CardManager.save_cache_to_disk(cache)
+		_save_deck_cache(cache)
 
 		if refresh_callback.is_valid(): refresh_callback.call()
 		if is_instance_valid(line_edit): line_edit.text = ""
+
+	else:
+		if is_instance_valid(import_btn):
+			import_btn.text = "BAD JSON"
+			import_btn.disabled = false
+		return
 
 	if is_instance_valid(import_btn):
 		import_btn.text = "IMPORT"
@@ -436,7 +489,7 @@ func load_and_spawn_all_decks(selections: Dictionary) -> void:
 	engine.hud_manager.show_loading_screen("Loading all player decks...")
 	engine.hud_manager.setup_phase_hud()
 
-	var cache := CardManager.load_cache_from_disk()
+	var cache := _load_deck_cache()
 	_pending_deck_loads = 0
 	for pid in selections.keys():
 		if cache.has(selections[pid]):

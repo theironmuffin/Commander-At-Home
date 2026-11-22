@@ -8,6 +8,9 @@ var life_name_labels: Dictionary = {}
 var cmd_dmg_labels: Dictionary = {}
 var match_log_canvas: CanvasLayer = null
 var settings_canvas: CanvasLayer = null
+var touch_bar_canvas: CanvasLayer = null
+var touch_atk_btn: Button = null
+var touch_controls_enabled: bool = false
 var tracker_canvas: CanvasLayer = null
 var life_hud_canvas: CanvasLayer = null
 
@@ -52,13 +55,17 @@ var active_target_source: Node3D = null
 
 func setup(main_engine: Node) -> void:
 	engine = main_engine
+	touch_controls_enabled = DisplayServer.is_touchscreen_available() or (OS.get_name() in ["Android", "iOS"])
 	setup_mana_ui()
 	setup_stack_ui()
 	setup_card_preview_ui()
 	setup_life_hud()
 
 	EventBus.phase_changed.connect(func(_p): update_phase_ui())
-	EventBus.turn_changed.connect(func(_pid, _t): update_phase_ui())
+	EventBus.turn_changed.connect(func(pid, t):
+		update_phase_ui()
+		show_turn_banner(pid, t)
+	)
 	EventBus.priority_changed.connect(func(_pid, _c): update_phase_ui())
 	EventBus.stack_changed.connect(func(_s):
 		update_phase_ui()
@@ -125,6 +132,79 @@ func refresh_player_names() -> void:
 		engine.refresh_command_info_stations()
 	update_phase_ui()
 
+func setup_touch_action_bar() -> void:
+	if touch_bar_canvas and is_instance_valid(touch_bar_canvas):
+		touch_bar_canvas.queue_free()
+		touch_bar_canvas = null
+	if not touch_controls_enabled: return
+
+	touch_bar_canvas = CanvasLayer.new()
+	touch_bar_canvas.name = "TouchActionBarHUD"
+	touch_bar_canvas.layer = 40
+	engine.add_child(touch_bar_canvas)
+
+	var safe := DisplayServer.get_display_safe_area()
+	var win_sz := DisplayServer.window_get_size()
+	var left_pad := maxi(16, safe.position.x + 8)
+	var bot_pad := maxi(16, (win_sz.y - (safe.position.y + safe.size.y)) + 12) if win_sz.y > 0 else 16
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", left_pad)
+	margin.add_theme_constant_override("margin_bottom", bot_pad)
+	margin.anchor_left = 0.0; margin.anchor_right = 0.0; margin.anchor_top = 1.0; margin.anchor_bottom = 1.0
+	margin.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	touch_bar_canvas.add_child(margin)
+
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	margin.add_child(hbox)
+
+	touch_atk_btn = Button.new()
+	touch_atk_btn.text = "⚔ Attack Mode: OFF"
+	touch_atk_btn.custom_minimum_size = Vector2(145, 48)
+	touch_atk_btn.pressed.connect(func():
+		engine.touch_attack_mode = not engine.touch_attack_mode
+		touch_atk_btn.text = "⚔ Attack Mode: ON" if engine.touch_attack_mode else "⚔ Attack Mode: OFF"
+	)
+	hbox.add_child(touch_atk_btn)
+
+	var cyc_btn := Button.new()
+	cyc_btn.text = "🎯 Cycle Target"
+	cyc_btn.custom_minimum_size = Vector2(125, 48)
+	cyc_btn.pressed.connect(func():
+		for c in engine.battlefield_non_lands:
+			if is_instance_valid(c) and bool(c.get("is_attacking")) and engine.get_card_owner_id(c) == engine.local_player_id:
+				engine.combat_manager.handle_declare_attacker_key(c, true)
+	)
+	hbox.add_child(cyc_btn)
+
+	var gy_btn := Button.new()
+	gy_btn.text = "💀 GY"
+	gy_btn.custom_minimum_size = Vector2(74, 48)
+	gy_btn.pressed.connect(func():
+		open_zone_viewer("%s's Graveyard" % engine.get_player_display_name(engine.local_player_id), engine.graveyard_stack, engine.local_player_id)
+	)
+	hbox.add_child(gy_btn)
+
+	var ex_btn := Button.new()
+	ex_btn.text = "🌀 Exile"
+	ex_btn.custom_minimum_size = Vector2(82, 48)
+	ex_btn.pressed.connect(func():
+		open_zone_viewer("%s's Exile" % engine.get_player_display_name(engine.local_player_id), engine.exile_stack, engine.local_player_id)
+	)
+	hbox.add_child(ex_btn)
+
+	var cam_btn := Button.new()
+	cam_btn.text = "📷 Cam"
+	cam_btn.custom_minimum_size = Vector2(82, 48)
+	cam_btn.pressed.connect(func():
+		if engine.camera and engine.camera.has_method("reset_to_home"):
+			engine.camera.reset_to_home()
+	)
+	hbox.add_child(cam_btn)
+
+	apply_custom_font(touch_bar_canvas)
+
 func setup_life_hud() -> void:
 	life_hud_canvas = CanvasLayer.new()
 	life_hud_canvas.name = "LifeTrackerHUD"
@@ -159,6 +239,7 @@ func setup_life_hud() -> void:
 	vbox.add_child(settings_btn)
 
 	apply_custom_font(life_hud_canvas)
+	setup_touch_action_bar()
 
 func _on_life_total_changed(player_id: int, new_total: int, _amount: int) -> void:
 	if life_labels.has(player_id):
@@ -1062,7 +1143,7 @@ func open_zone_viewer(zone_title: String, zone_cards: Array, zone_owner_id: int 
 					var req_ref := instance_from_id(http_id)
 					if req_ref and is_instance_valid(req_ref): req_ref.queue_free()
 					if response_code == 200:
-						var fetched_tex := CardManager.store_image_to_cache(front_url, body)
+						var fetched_tex: Texture2D = CardManager.store_image_to_cache(front_url, body)
 						if fetched_tex:
 							var btn_ref := instance_from_id(btn_id) as TextureButton
 							if btn_ref and is_instance_valid(btn_ref):
@@ -2254,6 +2335,16 @@ func toggle_settings_menu() -> void:
 	)
 	vbox.add_child(auto_btn)
 
+	var touch_btn := Button.new()
+	touch_btn.text = "Touch Action Bar: ON" if touch_controls_enabled else "Touch Action Bar: OFF"
+	touch_btn.custom_minimum_size = Vector2(0, 42)
+	touch_btn.pressed.connect(func():
+		touch_controls_enabled = not touch_controls_enabled
+		touch_btn.text = "Touch Action Bar: ON" if touch_controls_enabled else "Touch Action Bar: OFF"
+		setup_touch_action_bar()
+	)
+	vbox.add_child(touch_btn)
+
 	var spd_btn := Button.new()
 	var _spd_label := func() -> String:
 		if engine.controller_cursor_speed < 750.0: return "Controller Cursor Speed: Slow"
@@ -2535,3 +2626,55 @@ func toggle_table_trackers() -> void:
 		st_row.add_child(dng_b)
 
 	apply_custom_font(tracker_canvas)
+
+
+var _turn_banner_canvas: CanvasLayer = null
+
+func show_turn_banner(pid: int, turn_num: int) -> void:
+	if _turn_banner_canvas and is_instance_valid(_turn_banner_canvas):
+		_turn_banner_canvas.queue_free()
+	_turn_banner_canvas = CanvasLayer.new()
+	_turn_banner_canvas.layer = 95
+	engine.add_child(_turn_banner_canvas)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	center.offset_top = 86
+	center.offset_bottom = 146
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_turn_banner_canvas.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var style := StyleBoxFlat.new()
+	var is_local: bool = (pid == engine.local_player_id)
+	style.bg_color = Color(0.08, 0.11, 0.14, 0.92)
+	style.border_color = Color(0.40, 0.92, 0.50, 0.95) if is_local else Color(0.95, 0.78, 0.32, 0.95)
+	style.set_border_width_all(2)
+	style.corner_radius_top_left = 10; style.corner_radius_top_right = 10
+	style.corner_radius_bottom_left = 10; style.corner_radius_bottom_right = 10
+	style.content_margin_left = 26; style.content_margin_right = 26
+	style.content_margin_top = 8; style.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+
+	var lbl := Label.new()
+	var p_name: String = engine.get_player_display_name(pid).to_upper()
+	lbl.text = ("YOUR TURN  •  TURN %d" % turn_num) if is_local else ("%s'S TURN  •  TURN %d" % [p_name, turn_num])
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.add_theme_font_size_override("font_size", 17)
+	lbl.add_theme_color_override("font_color", Color(0.55, 1.0, 0.65) if is_local else Color(1.0, 0.88, 0.50))
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(lbl)
+
+	apply_custom_font(_turn_banner_canvas)
+	panel.modulate.a = 0.0
+	var c_id := _turn_banner_canvas.get_instance_id()
+	var tw := engine.create_tween()
+	tw.tween_property(panel, "modulate:a", 1.0, 0.18)
+	tw.tween_interval(1.05)
+	tw.tween_property(panel, "modulate:a", 0.0, 0.32)
+	tw.tween_callback(func():
+		var c := instance_from_id(c_id)
+		if c and is_instance_valid(c): c.queue_free()
+	)

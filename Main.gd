@@ -104,6 +104,7 @@ var mana_pool: Dictionary = {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
 var restricted_mana: Array[Dictionary] = []
 var land_played_this_turn: bool = false
 var mulligan_phase_active: bool = false
+var touch_attack_mode: bool = false
 var mulligan_count: int = 0
 var mulligan_bottom_remaining: int = 0
 var hovered_card: Node3D = null
@@ -119,6 +120,9 @@ var battlefield_day_night: String = ""
 var player_dungeons: Dictionary = {1: {}, 2: {}, 3: {}, 4: {}}
 @export var controller_cursor_speed: float = 950.0
 var _popup_nav_cooldown: float = 0.0
+var _virtual_cursor_pos: Vector2 = Vector2(-1.0, -1.0)
+var _controller_cursor_canvas: CanvasLayer = null
+var _controller_cursor_node: Control = null
 var targeting_arcs_mesh: ImmediateMesh = null
 var targeting_arcs_instance: MeshInstance3D = null
 
@@ -187,15 +191,26 @@ func _ready() -> void:
 		mat.roughness = 0.6
 		table_mesh.set_surface_override_material(0, mat)
 
+	if OS.get_name() == "Android":
+		Input.set_use_accumulated_input(true)
 	_load_player_sleeves()
 	_setup_zone_anchors()
 	_setup_targeting_arcs()
+	_setup_controller_cursor()
 	EventBus.phase_changed.connect(_on_phase_changed_triggers)
 	EventBus.combat_declared.connect(_on_combat_declared_triggers)
 	EventBus.blocker_declared.connect(_on_blocker_declared_triggers)
 	EventBus.damage_dealt.connect(_on_damage_dealt_triggers)
-	EventBus.life_total_changed.connect(func(_p, _n, _a): refresh_command_info_stations())
-	EventBus.damage_dealt.connect(func(_s, _t, _a): refresh_command_info_stations())
+	EventBus.life_total_changed.connect(func(p, _n, delta):
+		refresh_command_info_stations()
+		if delta != 0: spawn_floating_3d_text(p, "%+d" % delta, Color(0.35, 0.95, 0.45) if delta > 0 else Color(1.0, 0.32, 0.32))
+	)
+	EventBus.damage_dealt.connect(func(_s, t, amt):
+		refresh_command_info_stations()
+		if amt > 0 and t is Node3D and is_instance_valid(t):
+			spawn_floating_3d_text(t, "-%d" % amt, Color(1.0, 0.35, 0.25))
+	)
+	EventBus.turn_changed.connect(func(_pid, _t): refresh_command_info_stations())
 	deck_loader.show_deck_selector_ui()
 
 static func _initialize_regex_cache() -> void:
@@ -650,9 +665,39 @@ func _setup_command_info_stations() -> void:
 		st_lbl.pixel_size = 0.0019
 		st_lbl.modulate = Color(0.55, 0.90, 1.0, 1.0)
 		root.add_child(st_lbl)
-		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl, "status": st_lbl}
+		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl, "status": st_lbl, "border_mat": b_mat}
+
+func spawn_floating_3d_text(target: Variant, text_str: String, col: Color) -> void:
+	var world_pos := Vector3.ZERO
+	if target is Node3D and is_instance_valid(target):
+		world_pos = (target as Node3D).global_position + Vector3(0.0, 0.45, 0.0)
+	elif target is int and command_info_stations.has(int(target)):
+		var root_n: Node3D = command_info_stations[int(target)].get("root", null)
+		if is_instance_valid(root_n):
+			world_pos = root_n.global_position + Vector3(0.0, 0.35, 0.0)
+		else: return
+	else:
+		return
+	var lbl := Label3D.new()
+	if BELEREN_FONT: lbl.font = BELEREN_FONT
+	lbl.text = text_str
+	lbl.font_size = 54
+	lbl.outline_size = 14
+	lbl.pixel_size = 0.0045
+	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lbl.no_depth_test = true
+	lbl.modulate = col
+	add_child(lbl)
+	lbl.global_position = world_pos
+	var tw := create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(lbl, "global_position", world_pos + Vector3(0.0, 0.72, 0.0), 1.05)
+	tw.tween_property(lbl, "modulate:a", 0.0, 1.05).set_delay(0.25)
+	tw.chain().tween_callback(func():
+		if is_instance_valid(lbl): lbl.queue_free()
+	)
 
 func refresh_command_info_stations() -> void:
+	var act_pid: int = turn_manager.active_player_id if turn_manager else 1
 	for pid in command_info_stations.keys():
 		var st: Dictionary = command_info_stations[pid]
 		var name_lbl: Label3D = st["name"]
@@ -690,6 +735,20 @@ func refresh_command_info_stations() -> void:
 			if not d_info.is_empty():
 				s_parts.append("%s (Rm %d)" % [str(d_info.get("name", "Dungeon")).left(12), int(d_info.get("room", 1))])
 			st_lbl.text = " · ".join(s_parts)
+		var b_mat: StandardMaterial3D = st.get("border_mat", null)
+		if b_mat:
+			if cur_life <= 0:
+				b_mat.albedo_color = Color(0.28, 0.16, 0.16, 1.0)
+				b_mat.emission_enabled = false
+			elif int(pid) == act_pid:
+				var glow_col := Color(0.35, 0.95, 0.55) if int(pid) == local_player_id else Color(1.0, 0.82, 0.32)
+				b_mat.albedo_color = glow_col
+				b_mat.emission_enabled = true
+				b_mat.emission = glow_col
+				b_mat.emission_energy_multiplier = 0.85
+			else:
+				b_mat.albedo_color = UI_BORDER
+				b_mat.emission_enabled = false
 
 func setup_tabletop_layout() -> void:
 	central_stack_anchor = _create_anchor("CentralStack", Vector3(0.0, 0.55, 0.0))
@@ -1173,17 +1232,17 @@ func resolve_top_stack_card() -> void:
 				card_node.modify_counters(x_etb)
 		_apply_etb_tapped_replacement(card_node, face_idx)
 		_apply_etb_choice_replacements(card_node, face_idx)
+		if MagicRules.is_planeswalker(card_node.card_data, face_idx) and card_node.has_method("modify_named_counter"):
+			var start_loy: int = str(MagicRules.get_card_attribute(card_node.card_data, "loyalty", "0", face_idx)).to_int()
+			if start_loy > 0:
+				card_node.modify_named_counter("loyalty", start_loy)
+
 		if "land" in type_line: battlefield_lands.append(card_node)
 		else: battlefield_non_lands.append(card_node)
 
 		if MagicRules.is_room(card_node.card_data):
 			card_node.unlocked_rooms = [face_idx]
 			AbilityResolver.execute_effect_text(oracle_text, card_node, null, self)
-
-		if MagicRules.is_planeswalker(card_node.card_data, face_idx) and card_node.has_method("modify_named_counter"):
-			var start_loy: int = str(MagicRules.get_card_attribute(card_node.card_data, "loyalty", "0", face_idx)).to_int()
-			if start_loy > 0:
-				card_node.modify_named_counter("loyalty", start_loy)
 
 		if "enters as a copy of" in face_lower or "enters the battlefield as a copy of" in face_lower:
 			var p_owner := get_card_owner_id(card_node)
@@ -1279,16 +1338,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		KEY_ESCAPE:
-			var act_popup := get_node_or_null("ActivatedAbilitiesUI")
-			if act_popup:
-				act_popup.queue_free()
-				get_viewport().set_input_as_handled()
-			elif hud_manager.search_canvas and hud_manager.search_canvas.is_inside_tree():
-				hud_manager.search_canvas.queue_free(); hud_manager.search_canvas = null
-				get_viewport().set_input_as_handled()
-			elif hud_manager.targeting_attachment != null or hud_manager.active_target_callback.is_valid():
-				hud_manager.cancel_attachment_targeting()
-				get_viewport().set_input_as_handled()
+			close_top_modal_or_cancel()
+			get_viewport().set_input_as_handled()
 			return
 
 	match k:
@@ -1422,6 +1473,10 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 	if hud_manager.active_target_callback.is_valid():
 		hud_manager.select_target(card_node)
 		return
+
+	if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and touch_attack_mode and button_index == MOUSE_BUTTON_LEFT and turn_manager.is_local_player_turn():
+		if combat_manager.handle_declare_attacker_key(card_node, false):
+			return
 
 	if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_BLOCKERS and button_index == MOUSE_BUTTON_LEFT:
 		if combat_manager.handle_declare_blocker_click(card_node):
@@ -2176,8 +2231,56 @@ func _find_visible_scroll_container(root: Node) -> ScrollContainer:
 		if found != null: return found
 	return null
 
+func _setup_controller_cursor() -> void:
+	_controller_cursor_canvas = CanvasLayer.new()
+	_controller_cursor_canvas.name = "ControllerCursorHUD"
+	_controller_cursor_canvas.layer = 200
+	add_child(_controller_cursor_canvas)
+
+	_controller_cursor_node = Control.new()
+	_controller_cursor_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_controller_cursor_node.visible = false
+	_controller_cursor_canvas.add_child(_controller_cursor_node)
+
+	var outer := ColorRect.new()
+	outer.color = Color(1.0, 0.85, 0.3, 0.95)
+	outer.size = Vector2(18, 18)
+	outer.position = Vector2(-9, -9)
+	outer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_controller_cursor_node.add_child(outer)
+
+	var inner := ColorRect.new()
+	inner.color = Color(0.1, 0.12, 0.16, 1.0)
+	inner.size = Vector2(10, 10)
+	inner.position = Vector2(-5, -5)
+	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_controller_cursor_node.add_child(inner)
+
+	var dot := ColorRect.new()
+	dot.color = Color(1.0, 1.0, 1.0, 1.0)
+	dot.size = Vector2(4, 4)
+	dot.position = Vector2(-2, -2)
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_controller_cursor_node.add_child(dot)
+
+func _get_controller_cursor_pos() -> Vector2:
+	if _virtual_cursor_pos.x >= 0.0:
+		return _virtual_cursor_pos
+	return get_viewport().get_mouse_position()
+
 func _update_controller_cursor(delta: float) -> void:
-	if Input.get_connected_joypads().is_empty(): return
+	if Input.get_connected_joypads().is_empty():
+		if _controller_cursor_node: _controller_cursor_node.visible = false
+		return
+	var vp := get_viewport()
+	var vp_size := vp.get_visible_rect().size
+	if _virtual_cursor_pos.x < 0.0:
+		_virtual_cursor_pos = vp_size * 0.5
+	var is_mobile_os := OS.get_name() in ["Android", "iOS"]
+	if _controller_cursor_node and is_mobile_os:
+		_controller_cursor_node.visible = true
+		_controller_cursor_node.position = _virtual_cursor_pos
+
 	var lx: float = Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
 	var ly: float = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
 	if _popup_nav_cooldown > 0.0:
@@ -2186,21 +2289,27 @@ func _update_controller_cursor(delta: float) -> void:
 	if open_popup != null and open_popup.item_count > 0:
 		if absf(ly) > 0.45 and _popup_nav_cooldown <= 0.0:
 			var cur_idx: int = open_popup.get_focused_item()
-			if cur_idx < 0:
-				var ob := open_popup.get_parent() as OptionButton
-				cur_idx = ob.selected if (ob and ob.selected >= 0) else 0
 			var step: int = 1 if ly > 0.0 else -1
-			var next_idx: int = (cur_idx + step + open_popup.item_count) % open_popup.item_count
+			var next_idx: int = (cur_idx + step + open_popup.item_count) % open_popup.item_count if cur_idx >= 0 else 0
 			open_popup.set_focused_item(next_idx)
 			_popup_nav_cooldown = 0.18
 		return
 	var stick_vec := Vector2(lx, ly)
 	if stick_vec.length() > 0.18:
-		var vp := get_viewport()
-		var cur := vp.get_mouse_position()
-		var vp_size := vp.get_visible_rect().size
-		var next_pos := (cur + stick_vec * controller_cursor_speed * delta).clamp(Vector2.ZERO, vp_size)
-		vp.warp_mouse(next_pos)
+		var prev_pos := _virtual_cursor_pos if is_mobile_os else vp.get_mouse_position()
+		var next_pos := (prev_pos + stick_vec * controller_cursor_speed * delta).clamp(Vector2.ZERO, vp_size)
+		_virtual_cursor_pos = next_pos
+		if _controller_cursor_node and is_mobile_os:
+			_controller_cursor_node.position = next_pos
+		var screen_pos: Vector2 = vp.get_screen_transform() * next_pos
+		var prev_screen_pos: Vector2 = vp.get_screen_transform() * prev_pos
+		vp.warp_mouse(screen_pos)
+		if is_mobile_os:
+			var mot := InputEventMouseMotion.new()
+			mot.position = screen_pos
+			mot.global_position = screen_pos
+			mot.relative = screen_pos - prev_screen_pos
+			Input.parse_input_event(mot)
 
 		# Sync 3D card hover when cursor is over the 3D tabletop (not a UI panel)
 		if vp.gui_get_hovered_control() == null:
@@ -2242,7 +2351,7 @@ func _find_card_node_from_collider(obj: Object) -> Node3D:
 	return null
 
 func _synthesize_mouse_left_click() -> void:
-	var pos := get_viewport().get_mouse_position()
+	var pos: Vector2 = get_viewport().get_screen_transform() * _get_controller_cursor_pos()
 	var down := InputEventMouseButton.new()
 	down.button_index = MOUSE_BUTTON_LEFT
 	down.button_mask = MOUSE_BUTTON_MASK_LEFT
@@ -2272,6 +2381,14 @@ func _find_visible_popup_menu(root: Node) -> PopupMenu:
 
 func _activate_ui_control(ctrl: Control) -> bool:
 	if ctrl == null or not is_instance_valid(ctrl): return false
+	if ctrl is LineEdit:
+		var le := ctrl as LineEdit
+		if le.editable:
+			le.grab_focus()
+			le.caret_column = le.text.length()
+			if DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
+				DisplayServer.virtual_keyboard_show(le.text)
+			return true
 	if ctrl is OptionButton:
 		var ob := ctrl as OptionButton
 		if not ob.disabled:
@@ -2301,39 +2418,29 @@ func _handle_joypad_button(btn_idx: int) -> void:
 			if hud_manager.phase_ui_label:
 				turn_manager.request_primary_action()
 				vp.set_input_as_handled()
-		JOY_BUTTON_B:
+		JOY_BUTTON_START:
+			hud_manager.toggle_settings_menu()
+			vp.set_input_as_handled()
+		JOY_BUTTON_DPAD_UP:
 			var open_popup := _find_visible_popup_menu(get_tree().root)
-			if open_popup != null:
-				open_popup.hide()
-				vp.set_input_as_handled()
-				return
-			if hud_manager.settings_canvas and is_instance_valid(hud_manager.settings_canvas):
-				hud_manager.toggle_settings_menu()
-				vp.set_input_as_handled()
-				return
-			if hud_manager.tracker_canvas and is_instance_valid(hud_manager.tracker_canvas):
-				hud_manager.toggle_table_trackers()
-				vp.set_input_as_handled()
-				return
-			if hud_manager.match_log_canvas and is_instance_valid(hud_manager.match_log_canvas):
-				hud_manager.toggle_match_log()
-				vp.set_input_as_handled()
-				return
-			if hud_manager.controller_help_canvas and is_instance_valid(hud_manager.controller_help_canvas):
-				hud_manager.toggle_controller_help()
-				vp.set_input_as_handled()
-				return
-			var act_popup := get_node_or_null("ActivatedAbilitiesUI")
-			if act_popup:
-				act_popup.queue_free()
-			elif hud_manager.search_canvas and hud_manager.search_canvas.is_inside_tree():
-				hud_manager.search_canvas.queue_free(); hud_manager.search_canvas = null
-			elif hud_manager.targeting_attachment != null or hud_manager.active_target_callback.is_valid():
-				hud_manager.cancel_attachment_targeting()
-			elif combat_manager.selected_blocker != null:
-				if is_instance_valid(combat_manager.selected_blocker) and combat_manager.selected_blocker.has_method("set_highlight"):
-					combat_manager.selected_blocker.set_highlight(false)
-				combat_manager.selected_blocker = null
+			if open_popup != null and open_popup.item_count > 0:
+				var cur_i: int = open_popup.get_focused_item()
+				open_popup.set_focused_item((cur_i - 1 + open_popup.item_count) % open_popup.item_count if cur_i >= 0 else 0)
+			else:
+				var sc := _find_visible_scroll_container(self)
+				if sc: sc.scroll_vertical = maxi(0, sc.scroll_vertical - 120)
+			vp.set_input_as_handled()
+		JOY_BUTTON_DPAD_DOWN:
+			var open_popup := _find_visible_popup_menu(get_tree().root)
+			if open_popup != null and open_popup.item_count > 0:
+				var cur_i: int = open_popup.get_focused_item()
+				open_popup.set_focused_item((cur_i + 1) % open_popup.item_count if cur_i >= 0 else 0)
+			else:
+				var sc := _find_visible_scroll_container(self)
+				if sc: sc.scroll_vertical += 120
+			vp.set_input_as_handled()
+		JOY_BUTTON_B:
+			close_top_modal_or_cancel()
 			vp.set_input_as_handled()
 		JOY_BUTTON_A:
 			var open_popup := _find_visible_popup_menu(get_tree().root)
@@ -2358,7 +2465,7 @@ func _handle_joypad_button(btn_idx: int) -> void:
 				_synthesize_mouse_left_click()
 				vp.set_input_as_handled()
 				return
-			var hit_obj := _raycast_3d_at_screen_pos(vp.get_mouse_position())
+			var hit_obj := _raycast_3d_at_screen_pos(_get_controller_cursor_pos())
 			var target_card := hovered_card if (hovered_card != null and is_instance_valid(hovered_card)) else _find_card_node_from_collider(hit_obj)
 			if target_card != null and is_instance_valid(target_card):
 				if target_card.is_on_battlefield:
@@ -2379,7 +2486,7 @@ func _handle_joypad_button(btn_idx: int) -> void:
 				_synthesize_mouse_left_click()
 			vp.set_input_as_handled()
 		JOY_BUTTON_X:
-			var target_card := hovered_card if (hovered_card != null and is_instance_valid(hovered_card)) else _find_card_node_from_collider(_raycast_3d_at_screen_pos(vp.get_mouse_position()))
+			var target_card := hovered_card if (hovered_card != null and is_instance_valid(hovered_card)) else _find_card_node_from_collider(_raycast_3d_at_screen_pos(_get_controller_cursor_pos()))
 			if target_card != null and is_instance_valid(target_card) and target_card.is_on_battlefield:
 				if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and turn_manager.is_local_player_turn() and get_card_owner_id(target_card) == local_player_id:
 					combat_manager.handle_declare_attacker_key(target_card, false)
@@ -2388,7 +2495,7 @@ func _handle_joypad_button(btn_idx: int) -> void:
 				vp.set_input_as_handled()
 		JOY_BUTTON_LEFT_SHOULDER:
 			if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and turn_manager.is_local_player_turn():
-				var target_card := hovered_card if (hovered_card != null and is_instance_valid(hovered_card)) else _find_card_node_from_collider(_raycast_3d_at_screen_pos(vp.get_mouse_position()))
+				var target_card := hovered_card if (hovered_card != null and is_instance_valid(hovered_card)) else _find_card_node_from_collider(_raycast_3d_at_screen_pos(_get_controller_cursor_pos()))
 				if target_card != null and is_instance_valid(target_card) and target_card.is_on_battlefield and get_card_owner_id(target_card) == local_player_id:
 					combat_manager.handle_declare_attacker_key(target_card, true)
 				else:
@@ -2415,3 +2522,48 @@ func _handle_joypad_button(btn_idx: int) -> void:
 				else:
 					zone_manager.untap_all(local_player_id)
 				vp.set_input_as_handled()
+
+
+func close_top_modal_or_cancel() -> void:
+	var focus_ctrl := get_viewport().gui_get_focus_owner()
+	if focus_ctrl is LineEdit:
+		focus_ctrl.release_focus()
+		if DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
+			DisplayServer.virtual_keyboard_hide()
+		return
+	var open_popup := _find_visible_popup_menu(get_tree().root)
+	if open_popup != null:
+		open_popup.hide()
+		return
+	if hud_manager.settings_canvas and is_instance_valid(hud_manager.settings_canvas):
+		hud_manager.toggle_settings_menu()
+		return
+	if hud_manager.tracker_canvas and is_instance_valid(hud_manager.tracker_canvas):
+		hud_manager.toggle_table_trackers()
+		return
+	if hud_manager.match_log_canvas and is_instance_valid(hud_manager.match_log_canvas):
+		hud_manager.toggle_match_log()
+		return
+	if hud_manager.controller_help_canvas and is_instance_valid(hud_manager.controller_help_canvas):
+		hud_manager.toggle_controller_help()
+		return
+	var dismissibles := get_tree().get_nodes_in_group("dismissible_popup")
+	if not dismissibles.is_empty():
+		var top_p: Node = dismissibles[dismissibles.size() - 1]
+		if is_instance_valid(top_p):
+			top_p.queue_free()
+			return
+	var act_popup := get_node_or_null("ActivatedAbilitiesUI")
+	if act_popup:
+		act_popup.queue_free()
+		return
+	if hud_manager.search_canvas and hud_manager.search_canvas.is_inside_tree():
+		hud_manager.search_canvas.queue_free(); hud_manager.search_canvas = null
+		return
+	if hud_manager.targeting_attachment != null or hud_manager.active_target_callback.is_valid():
+		hud_manager.cancel_attachment_targeting()
+		return
+	if combat_manager.selected_blocker != null:
+		if is_instance_valid(combat_manager.selected_blocker) and combat_manager.selected_blocker.has_method("set_highlight"):
+			combat_manager.selected_blocker.set_highlight(false)
+		combat_manager.selected_blocker = null

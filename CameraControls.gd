@@ -24,6 +24,11 @@ extends Camera3D
 var is_rotating: bool = false
 var is_resetting: bool = false
 var active_tween: Tween = null
+var _touches: Dictionary = {}
+var _touch_on_hand_card: bool = false
+@export var touch_pan_speed: float = 0.012
+@export var touch_zoom_speed: float = 0.022
+@export var touch_rotate_speed: float = 0.004
 
 func _ready() -> void:
 	position = home_position
@@ -31,6 +36,52 @@ func _ready() -> void:
 	target_y = home_position.y
 
 func _unhandled_input(event: InputEvent) -> void:
+	var parent_modal: bool = get_parent() != null and get_parent().has_method("is_modal_ui_open") and bool(get_parent().is_modal_ui_open())
+	if event is InputEventScreenTouch:
+		var t_ev := event as InputEventScreenTouch
+		if t_ev.pressed:
+			_touches[t_ev.index] = t_ev.position
+			if _touches.size() == 1:
+				_touch_on_hand_card = false
+				var space := get_world_3d().direct_space_state
+				if space:
+					var ro := project_ray_origin(t_ev.position)
+					var rd := project_ray_normal(t_ev.position)
+					var q := PhysicsRayQueryParameters3D.create(ro, ro + rd * 50.0)
+					q.collide_with_areas = true
+					q.collide_with_bodies = true
+					var hit := space.intersect_ray(q)
+					if hit and hit.has("collider"):
+						var col = hit["collider"]
+						if col != null and ("is_interactive" in col) and bool(col.get("is_interactive")) and not bool(col.get("is_on_battlefield")):
+							_touch_on_hand_card = true
+		else:
+			_touches.erase(t_ev.index)
+			if _touches.is_empty(): _touch_on_hand_card = false
+		return
+	elif event is InputEventScreenDrag:
+		var d_ev := event as InputEventScreenDrag
+		var prev_pos: Vector2 = _touches.get(d_ev.index, d_ev.position - d_ev.relative)
+		_touches[d_ev.index] = d_ev.position
+		if parent_modal: return
+		if _touches.size() == 1:
+			if _touch_on_hand_card: return
+			translate(Vector3(-event.relative.x * touch_pan_speed, event.relative.y * touch_pan_speed, 0.0))
+			get_viewport().set_input_as_handled()
+		elif _touches.size() == 2:
+			var keys: Array = _touches.keys()
+			var other_idx: int = keys[1] if keys[0] == event.index else keys[0]
+			var other_pos: Vector2 = _touches[other_idx]
+			var old_dist: float = prev_pos.distance_to(other_pos)
+			var new_dist: float = (event as InputEventScreenDrag).position.distance_to(other_pos)
+			var dist_delta: float = new_dist - old_dist
+			target_y = clampf(target_y - dist_delta * touch_zoom_speed, min_zoom, max_zoom)
+			rotate_y(-event.relative.x * touch_rotate_speed * 0.5)
+			rotate_object_local(Vector3.RIGHT, -event.relative.y * touch_rotate_speed * 0.5)
+			rotation.x = clampf(rotation.x, deg_to_rad(-89.0), deg_to_rad(89.0))
+			get_viewport().set_input_as_handled()
+		return
+
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			is_rotating = event.pressed

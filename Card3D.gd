@@ -87,6 +87,11 @@ var _fly_phase: float = 0.0
 var _flair_root: Node3D = null
 var _flair_items: Array[Dictionary] = []
 var _flair_signature: String = ""
+var _touch_active: bool = false
+var _long_press_fired: bool = false
+var _touch_index: int = -1
+var _touch_down_pos: Vector2 = Vector2.ZERO
+var _touch_down_time_ms: int = 0
 
 func _ready() -> void:
 	mouse_entered.connect(_on_mouse_entered)
@@ -249,9 +254,77 @@ func refresh_visual_status() -> void:
 	if status_badge_label:
 		status_badge_label.visible = false
 
+
+func _input(event: InputEvent) -> void:
+	if not _touch_active or is_on_battlefield or not is_interactive:
+		return
+	if event is InputEventScreenDrag:
+		var d_ev := event as InputEventScreenDrag
+		if d_ev.index != _touch_index: return
+		var swipe_up: float = _touch_down_pos.y - d_ev.position.y
+		var swipe_x: float = absf(d_ev.position.x - _touch_down_pos.x)
+		if front_face and swipe_up > 0.0:
+			front_face.position.y = front_face_rest_pos.y + clampf(swipe_up * 0.0025, 0.0, 0.4)
+		if swipe_up >= 75.0 and swipe_up > swipe_x * 0.9:
+			_touch_active = false
+			_long_press_fired = true
+			if front_face: front_face.position.y = front_face_rest_pos.y
+			card_played.emit(self)
+			get_viewport().set_input_as_handled()
+	elif event is InputEventScreenTouch:
+		var t_ev := event as InputEventScreenTouch
+		if not t_ev.pressed and t_ev.index == _touch_index:
+			var swipe_up: float = _touch_down_pos.y - t_ev.position.y
+			_touch_active = false
+			if front_face: front_face.position.y = front_face_rest_pos.y
+			if not _long_press_fired and swipe_up >= 75.0:
+				card_played.emit(self)
+				get_viewport().set_input_as_handled()
+
 func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _normal: Vector3, _shape_idx: int) -> void:
 	if not is_interactive: return
+	if event is InputEventScreenTouch:
+		var t_ev := event as InputEventScreenTouch
+		if t_ev.pressed:
+			_touch_active = true
+			_long_press_fired = false
+			_touch_index = t_ev.index
+			_touch_down_pos = t_ev.position
+			_touch_down_time_ms = Time.get_ticks_msec()
+			card_hovered.emit(self)
+		elif _touch_active and t_ev.index == _touch_index:
+			var moved: float = t_ev.position.distance_to(_touch_down_pos)
+			var swipe_up: float = _touch_down_pos.y - t_ev.position.y
+			_touch_active = false
+			if front_face: front_face.position.y = front_face_rest_pos.y
+			if not _long_press_fired:
+				if is_on_battlefield:
+					if moved < 28.0:
+						card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_LEFT)
+				else:
+					if swipe_up >= 85.0:
+						card_played.emit(self)
+		return
+	elif event is InputEventScreenDrag:
+		var d_ev := event as InputEventScreenDrag
+		if _touch_active and d_ev.index == _touch_index:
+			if is_on_battlefield:
+				if d_ev.position.distance_to(_touch_down_pos) > 28.0:
+					_touch_active = false
+			else:
+				var swipe_up: float = _touch_down_pos.y - d_ev.position.y
+				var swipe_x: float = absf(d_ev.position.x - _touch_down_pos.x)
+				if front_face and swipe_up > 0.0:
+					front_face.position.y = front_face_rest_pos.y + clampf(swipe_up * 0.002, 0.0, 0.35)
+				if swipe_up >= 90.0 and swipe_up > swipe_x * 1.1:
+					_touch_active = false
+					_long_press_fired = true
+					if front_face: front_face.position.y = front_face_rest_pos.y
+					card_played.emit(self)
+		return
+
 	if event is InputEventMouseButton and event.pressed:
+		if event.device == -1: return
 		if is_on_battlefield:
 			if event.button_index == MOUSE_BUTTON_RIGHT or (event.button_index == MOUSE_BUTTON_LEFT and event.shift_pressed):
 				card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_RIGHT)
@@ -323,7 +396,7 @@ func _get_face_image_url(face_idx: int) -> String:
 func _fetch_face_texture(face_idx: int) -> void:
 	var url := _get_face_image_url(face_idx)
 	if url.is_empty(): return
-	var cached_tex := CardManager.get_cached_image_texture(url)
+	var cached_tex: Texture2D = CardManager.get_cached_image_texture(url)
 	if cached_tex:
 		if face_idx == 1 and (MagicRules.is_transform(card_data) or MagicRules.is_modal_dfc(card_data)):
 			stored_back_texture = cached_tex
@@ -347,7 +420,7 @@ func _fetch_face_texture(face_idx: int) -> void:
 			var self_ref := instance_from_id(card_id)
 			if not (self_ref and is_instance_valid(self_ref)): return
 			if code == 200:
-				var tex := CardManager.store_image_to_cache(url, body)
+				var tex: Texture2D = CardManager.store_image_to_cache(url, body)
 				if tex:
 					if face_idx == 1 and (MagicRules.is_transform(card_data) or MagicRules.is_modal_dfc(card_data)):
 						stored_back_texture = tex
@@ -373,7 +446,7 @@ func get_triggered_abilities() -> Array:
 func _on_front_request_completed(_result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	if response_code == 200:
 		var front_url := _get_face_image_url(0)
-		var texture := CardManager.store_image_to_cache(front_url, body)
+		var texture: Texture2D = CardManager.store_image_to_cache(front_url, body)
 		if texture:
 			stored_front_texture = texture
 			card_texture_ready.emit(texture)
@@ -428,6 +501,9 @@ func modify_counters(amount: int) -> void:
 	plus_counters = counter_amount
 	_refresh_counter_label()
 	refresh_visual_status()
+	if amount != 0 and is_on_battlefield and get_tree() and get_tree().current_scene and get_tree().current_scene.has_method("spawn_floating_3d_text"):
+		var col := Color(0.4, 0.95, 0.5) if amount > 0 else Color(0.95, 0.4, 0.4)
+		get_tree().current_scene.spawn_floating_3d_text(self, "%+d/%+d" % [amount, amount], col)
 
 func modify_named_counter(counter_type: String, delta: int) -> void:
 	var eb := get_node_or_null("/root/EventBus")
@@ -531,6 +607,13 @@ func play_damage_flash() -> void:
 		damage_shake_tween.tween_property(front_face, "position:x", front_face_rest_pos.x, 0.05)
 
 func _process(delta: float) -> void:
+	if _touch_active and not _long_press_fired and Time.get_ticks_msec() - _touch_down_time_ms >= 420:
+		_long_press_fired = true
+		_touch_active = false
+		if is_on_battlefield:
+			card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_RIGHT)
+		else:
+			card_hovered.emit(self)
 	if not front_face: return
 	_fly_phase += delta * 2.4
 	if not (is_on_battlefield and has_custom_status("Monstrous")) and not front_face.scale.is_equal_approx(Vector3.ONE):

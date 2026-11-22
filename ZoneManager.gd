@@ -512,6 +512,10 @@ func move_to_battlefield_from_zone(card_node: Node3D, controller_id: int, enter_
 	if enter_tapped and not card_node.is_tapped: card_node.toggle_tap()
 	elif is_land_card: engine._apply_etb_tapped_replacement(card_node, 0)
 
+	if MagicRules.is_planeswalker(card_node.card_data) and card_node.has_method("modify_named_counter"):
+		var start_loy: int = str(MagicRules.get_card_attribute(card_node.card_data, "loyalty", "0")).to_int()
+		if start_loy > 0:
+			card_node.modify_named_counter("loyalty", start_loy)
 	if is_land_card: engine.battlefield_lands.append(card_node)
 	else: engine.battlefield_non_lands.append(card_node)
 	EventBus.notify_etb(card_node, "Graveyard")

@@ -120,16 +120,18 @@ func _parse_scryfall_response(data: Dictionary, metadata_map: Dictionary, alias_
 		var oracle_text: String = str(j.get("oracle_text", ""))
 		var power := str(j.get("power", "1"))
 		var toughness := str(j.get("toughness", "1"))
+		var loyalty := str(j.get("loyalty", ""))
 
+		var is_mobile := OS.get_name() in ["Android", "iOS"]
 		var img_uris: Dictionary = j.get("image_uris", {})
-		var image_url: String = str(img_uris.get("normal", img_uris.get("small", "")))
+		var image_url: String = str(img_uris.get("small", img_uris.get("normal", ""))) if is_mobile else str(img_uris.get("normal", img_uris.get("small", "")))
 
 		var parsed_faces: Array[Dictionary] = []
 		if j.get("card_faces") is Array and not j["card_faces"].is_empty():
 			for f in j["card_faces"]:
 				if not (f is Dictionary): continue
 				var f_uris: Dictionary = f.get("image_uris", {})
-				var f_img: String = str(f_uris.get("normal", f_uris.get("small", image_url)))
+				var f_img: String = str(f_uris.get("small", f_uris.get("normal", image_url))) if is_mobile else str(f_uris.get("normal", f_uris.get("small", image_url)))
 				var f_colors: Array[String] = []
 				for fc in f.get("colors", []): f_colors.append(str(fc).to_upper())
 				parsed_faces.append({
@@ -139,6 +141,7 @@ func _parse_scryfall_response(data: Dictionary, metadata_map: Dictionary, alias_
 					"oracle_text": str(f.get("oracle_text", "")),
 					"power": str(f.get("power", "0")),
 					"toughness": str(f.get("toughness", "0")),
+					"loyalty": str(f.get("loyalty", "")),
 					"colors": f_colors,
 					"image_url": f_img,
 					"image_uris": f_uris
@@ -182,6 +185,7 @@ func _parse_scryfall_response(data: Dictionary, metadata_map: Dictionary, alias_
 			"oracle_text": oracle_text,
 			"power": power,
 			"toughness": toughness,
+			"loyalty": loyalty,
 			"image_url": image_url,
 			"card_faces": parsed_faces,
 			"is_foil": foil_only
