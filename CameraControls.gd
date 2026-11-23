@@ -83,6 +83,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventMouseButton:
+		var gui_hovered: bool = get_viewport().gui_get_hovered_control() != null
+		if parent_modal or gui_hovered:
+			if event.button_index == MOUSE_BUTTON_WHEEL_UP or event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				get_viewport().set_input_as_handled()
+			return
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			is_rotating = event.pressed
 			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED if is_rotating else Input.MOUSE_MODE_VISIBLE)

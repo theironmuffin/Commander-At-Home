@@ -125,6 +125,40 @@ static func get_base_toughness(card_data: Dictionary, face_index: int = 0) -> in
 	var raw := str(get_card_attribute(card_data, "toughness", "0", face_index)).strip_edges()
 	return raw.to_int() if raw.is_valid_int() else 0
 
+static func count_legal_targets(requirement: String, caster_id: int, engine: Node, source_card: Node3D = null) -> int:
+	if engine == null: return 99
+	var req_l := requirement.to_lower().strip_edges()
+	if req_l.is_empty(): return 99
+	var cnt := 0
+	var is_perm_word := ("permanent" in req_l or "creature" in req_l or "artifact" in req_l or "enchantment" in req_l or "planeswalker" in req_l or "land" in req_l)
+	if ("opponent" in req_l or "player" in req_l) and not ("graveyard" in req_l) and not is_perm_word:
+		for pid in [1, 2, 3, 4]:
+			if int(engine.player_life.get(pid, 0)) <= 0: continue
+			if "opponent" in req_l and not ("player" in req_l) and pid == caster_id: continue
+			cnt += 1
+		return cnt
+	if "graveyard" in req_l:
+		var pools: Array = [engine.graveyard_stack]
+		for pk in engine.player_graveyards.keys(): pools.append(engine.player_graveyards[pk])
+		for pl in pools:
+			for c in pl:
+				if is_legal_target(c, requirement, caster_id, source_card): cnt += 1
+		return cnt
+	if "exile" in req_l:
+		var ex_pools: Array = [engine.exile_stack]
+		for pk in engine.player_exile.keys(): ex_pools.append(engine.player_exile[pk])
+		for pl in ex_pools:
+			for c in pl:
+				if is_legal_target(c, requirement, caster_id, source_card): cnt += 1
+		return cnt
+	if "spell" in req_l:
+		for s in engine.active_stack:
+			if is_legal_target(s, requirement, caster_id, source_card): cnt += 1
+		return cnt
+	for p in engine.battlefield_non_lands + engine.battlefield_lands:
+		if is_legal_target(p, requirement, caster_id, source_card): cnt += 1
+	return cnt
+
 static func is_legal_target(target_node: Variant, requirement: String, caster_id: int, source_card: Node3D = null) -> bool:
 	if not (target_node is Node3D) or not is_instance_valid(target_node):
 		return false

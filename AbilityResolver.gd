@@ -5,6 +5,7 @@ static var _REMINDER_REGEX: RegEx
 static var _PT_REGEX: RegEx
 static var _TOKEN_PT_REGEX: RegEx
 static var _MANA_SYM_REGEX: RegEx
+static var _ANY_COUNTER_REGEX: RegEx
 
 static func _ensure_regex() -> void:
 	if _REMINDER_REGEX == null:
@@ -19,6 +20,9 @@ static func _ensure_regex() -> void:
 	if _MANA_SYM_REGEX == null:
 		_MANA_SYM_REGEX = RegEx.new()
 		_MANA_SYM_REGEX.compile("\\{([WUBRGC])\\}")
+	if _ANY_COUNTER_REGEX == null:
+		_ANY_COUNTER_REGEX = RegEx.new()
+		_ANY_COUNTER_REGEX.compile("([+-]?\\d+/[+-]?\\d+|first strike|double strike|[a-z][a-z\\-]+)\\s+counter")
 
 # Evaluate conditional MTG phrases ("you control a Forest or an Island", "you control two or more other lands", etc.)
 static func evaluate_condition(cond_raw: String, source: Node3D, engine: Node, owner_id: int) -> bool:
@@ -69,6 +73,21 @@ static func evaluate_condition(cond_raw: String, source: Node3D, engine: Node, o
 		var amt := _extract_number(cond, "you have ")
 		return int(engine.player_life.get(owner_id, 0)) >= amt
 
+	# 5. Linked-exile card type checks ("it's a land card", "it's a nonland card", etc.)
+	if cond.begins_with("it's ") or cond.begins_with("it is "):
+		var last_ex: Dictionary = engine.get_meta("last_linked_exile_card") if engine.has_meta("last_linked_exile_card") else {}
+		if last_ex.is_empty():
+			return false
+		if "nonland" in cond:
+			return not MagicRules.is_land(last_ex)
+		if "land" in cond:
+			return MagicRules.is_land(last_ex)
+		var tl := MagicRules.get_card_type_line(last_ex).to_lower()
+		for ctype in ["creature", "artifact", "enchantment", "planeswalker", "instant", "sorcery", "battle"]:
+			if ctype in cond:
+				return ctype in tl
+		return false
+
 	return false
 
 # Entry point for spells, activated abilities, and triggered abilities
@@ -83,6 +102,8 @@ static func execute_effect_text(effect_text: String, source_card: Variant = null
 		valid_target = null
 
 	var owner_id: int = controller_id_override if controller_id_override > 0 else (engine_main.get_card_owner_id(valid_source) if (engine_main and valid_source) else 1)
+	if engine_main:
+		engine_main.set_meta("last_linked_exile_card", {})
 
 	var cleaned := _REMINDER_REGEX.sub(effect_text, "", true).strip_edges()
 	var clauses := _split_clauses(cleaned)
@@ -126,15 +147,39 @@ static func _execute_clause_with_conditions(clause: String, source: Node3D, targ
 static func _split_clauses(text: String) -> Array[String]:
 	var out: Array[String] = []
 	var normalized := text.replace("\n", ". ").replace(";", ".").replace(", then ", ". ").replace(". Then ", ". ")
-	for comma_verb in [", scry ", ", surveil ", ", draw ", ", you gain ", ", gain ", ", you lose ", ", lose ", ", discard ", ", mill ", ", create ", ", destroy ", ", exile ", ", return ", ", put ", ", tap ", ", untap "]:
-		if comma_verb == ", put " and "search your library" in normalized.to_lower():
-			continue
-		normalized = normalized.replace(comma_verb, ". " + comma_verb.substr(2))
-	for raw_sent in normalized.split("."):
-		var s := raw_sent.strip_edges()
+	if "create " in normalized.to_lower() and "token" in normalized.to_lower() and "\"" in normalized:
+		out.append(normalized.strip_edges())
+		return out
+	var comma_verbs := [", scry ", ", surveil ", ", draw ", ", you gain ", ", gain ", ", you lose ", ", lose ", ", discard ", ", mill ", ", create ", ", destroy ", ", exile ", ", return ", ", put ", ", tap ", ", untap "]
+	var raw_sents := normalized.split(".")
+	var si := 0
+	while si < raw_sents.size():
+		var s := raw_sents[si].strip_edges()
+		si += 1
 		if s.is_empty(): continue
-		for p in _split_compound_and(s):
-			if not p.is_empty(): out.append(p)
+		if "look at the top " in s.to_lower() and "library" in s.to_lower() and si < raw_sents.size():
+			var nxt := raw_sents[si].strip_edges()
+			var nxt_l := nxt.to_lower()
+			if "of them" in nxt_l or "put " in nxt_l or "reveal " in nxt_l:
+				s = s + ". " + nxt
+				si += 1
+				out.append(s)
+				continue
+		var s_low := s.to_lower()
+		var is_cond := s_low.begins_with("if ") or s_low.begins_with("when ") or s_low.begins_with("whenever ") or s_low.begins_with("unless ")
+		if is_cond:
+			out.append(s)
+			continue
+		var sub_norm := s
+		for comma_verb in comma_verbs:
+			if comma_verb == ", put " and "search your library" in s_low:
+				continue
+			sub_norm = sub_norm.replace(comma_verb, ". " + comma_verb.substr(2))
+		for sub_sent in sub_norm.split("."):
+			var ss := sub_sent.strip_edges()
+			if ss.is_empty(): continue
+			for p in _split_compound_and(ss):
+				if not p.is_empty(): out.append(p)
 	return out
 
 static func _split_compound_and(sentence: String) -> Array[String]:
@@ -162,6 +207,10 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 	var c := clause.to_lower().strip_edges()
 	if c.is_empty(): return
 
+	if ("on top of" in c or "on the bottom of" in c) and "library" in c:
+		_handle_put_on_library(c, source, target, engine); return
+	if "exiled with" in c and ("into your graveyard" in c or "into its owner's graveyard" in c):
+		_handle_put_linked_exile_to_gy(source, engine); return
 	if "search your library" in c:
 		_handle_library_search(c, engine, owner_id); return
 	if "become the monarch" in c or "becomes the monarch" in c:
@@ -189,12 +238,23 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 	if "becomes night" in c:
 		if engine: engine.set_day_night("Night")
 		return
-	if "poison counter" in c or "energy counter" in c or "experience counter" in c or "rad counter" in c:
-		var p_key := "poison" if "poison" in c else ("energy" if "energy" in c else ("experience" if "experience" in c else "rad"))
-		var amt := _extract_number(c, "get ") if "get " in c else _extract_number(c, "gets ")
-		for pid in _resolve_affected_players(c, engine, owner_id, target):
-			if engine: engine.modify_player_counter(pid, p_key, amt)
+	if c == "proliferate" or c.begins_with("proliferate "):
+		if engine:
+			for p_node in engine.battlefield_lands + engine.battlefield_non_lands:
+				if not is_instance_valid(p_node): continue
+				if "counter_amount" in p_node and int(p_node.counter_amount) != 0 and p_node.has_method("modify_counters"):
+					p_node.modify_counters(1 if int(p_node.counter_amount) > 0 else -1)
+				if "custom_counters" in p_node and p_node.custom_counters is Dictionary:
+					for ck in p_node.custom_counters.keys():
+						p_node.modify_named_counter(str(ck), 1)
+			for pid in [1, 2, 3, 4]:
+				var pc_dict: Dictionary = engine.player_counters.get(pid, {})
+				for pk in pc_dict.keys():
+					if int(pc_dict[pk]) > 0:
+						engine.modify_player_counter(pid, str(pk), 1)
 		return
+	if " counter" in c and ("put " in c or "remove " in c or "get " in c or "gets " in c or "double " in c or "distribute " in c):
+		_handle_counters(c, source, target, engine, owner_id); return
 	if "copy target" in c and "spell" in c:
 		_handle_copy_spell(target, engine, owner_id); return
 	if "discover " in c:
@@ -218,6 +278,8 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		_handle_damage(c, source, target, engine, owner_id); return
 	if " life" in c and ("gain " in c or "lose " in c or "loses " in c or "pay " in c):
 		_handle_life(c, engine, owner_id, target); return
+	if "look at the top " in c and "library" in c:
+		_handle_look_top_cards(c, engine, owner_id); return
 	if c.begins_with("scry ") or " scry " in c:
 		_handle_scry_or_surveil(c, engine, owner_id, false); return
 	if c.begins_with("surveil ") or " surveil " in c:
@@ -498,20 +560,57 @@ static func _handle_temp_pt(c: String, source: Node3D, target: Variant, engine: 
 			n.refresh_visual_status()
 
 static func _handle_counters(c: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> void:
-	var amount := _extract_number(c, "put ")
-	if "remove " in c: amount = -_extract_number(c, "remove ")
-	if "+1/+1 counter" in c or "-1/-1 counter" in c:
-		if "-1/-1 counter" in c: amount = -amount
-		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
-			if n.has_method("modify_counters"): n.modify_counters(amount)
-		return
+	_ensure_regex()
+	var is_remove := "remove " in c
+	var is_double := "double " in c and "counter" in c
+	var amount := 1
+	if is_remove:
+		amount = -_extract_number(c, "remove ")
+	elif "distribute " in c:
+		amount = _extract_number(c, "distribute ")
+	elif "get " in c:
+		amount = _extract_number(c, "get ")
+	elif "gets " in c:
+		amount = _extract_number(c, "gets ")
+	else:
+		amount = _extract_number(c, "put ")
 
 	var c_type := ""
-	for known in ["oil", "charge", "time", "loyalty", "stun", "shield", "lore", "energy", "poison", "experience"]:
-		if (known + " counter") in c: c_type = known; break
-	if not c_type.is_empty():
-		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
-			if n.has_method("modify_named_counter"): n.modify_named_counter(c_type, amount)
+	if "+1/+1 counter" in c:
+		c_type = "+1/+1"
+	elif "-1/-1 counter" in c:
+		c_type = "-1/-1"
+	else:
+		var cm := _ANY_COUNTER_REGEX.search(c)
+		if cm:
+			c_type = cm.get_string(1).strip_edges().to_lower()
+	if c_type.is_empty():
+		return
+
+	# Player counters ("you get", "target player gets", "remove ... from target player")
+	var is_player_counter := ("get " in c or "gets " in c or "target player" in c or "each player" in c or "target opponent" in c or "each opponent" in c or "from you" in c) and not ("creature" in c or "permanent" in c or "artifact" in c or "planeswalker" in c)
+	if is_player_counter and engine:
+		for pid in _resolve_affected_players(c, engine, owner_id, target):
+			if is_double:
+				var cur_pc: int = int(engine.player_counters.get(pid, {}).get(c_type, 0))
+				if cur_pc > 0: engine.modify_player_counter(pid, c_type, cur_pc)
+			else:
+				engine.modify_player_counter(pid, c_type, amount)
+		return
+
+	for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
+		if c_type == "+1/+1" or c_type == "-1/-1":
+			var delta: int = (-amount if c_type == "-1/-1" else amount)
+			if is_double and "counter_amount" in n:
+				delta = int(n.counter_amount)
+			if delta != 0 and n.has_method("modify_counters"):
+				n.modify_counters(delta)
+		else:
+			var n_delta: int = amount
+			if is_double and n.has_method("get_named_counter"):
+				n_delta = n.get_named_counter(c_type)
+			if n_delta != 0 and n.has_method("modify_named_counter"):
+				n.modify_named_counter(c_type, n_delta)
 
 static func _handle_create_tokens(c: String, engine: Node) -> void:
 	if not engine or not engine.has_method("_spawn_new_token"): return
@@ -556,13 +655,21 @@ static func _handle_create_tokens(c: String, engine: Node) -> void:
 		if "flying" in c: query_parts.append("o:flying")
 		query_parts.append("-is:dfc")
 
+		var tok_oracle_parts: Array[String] = []
+		if "flying" in c: tok_oracle_parts.append("Flying")
+		var q_start := c.find("\"")
+		if q_start != -1:
+			var q_end := c.find("\"", q_start + 1)
+			if q_end != -1:
+				tok_oracle_parts.append(c.substr(q_start + 1, q_end - q_start - 1).strip_edges())
+		var tok_oracle := "\n".join(tok_oracle_parts)
 		var extra_tl := (" ".join(extras_found).capitalize() + " ") if not extras_found.is_empty() else ""
 		var token_dict := {
 			"name": "%s/%s %s" % [pow_str, tou_str, subtype_str],
 			"type_line": "Token %sCreature — %s" % [extra_tl, subtype_str],
 			"power": pow_str,
 			"toughness": tou_str,
-			"oracle_text": "Flying" if "flying" in c else "",
+			"oracle_text": tok_oracle,
 			"query": " ".join(query_parts)
 		}
 		for i in range(amount): engine._spawn_new_token(token_dict)
@@ -587,32 +694,45 @@ static func _resolve_affected_permanents(c: String, source: Node3D, target: Vari
 		return result
 
 	var all_perms: Array = engine.battlefield_lands + engine.battlefield_non_lands
+	var matched_group := false
 	if "all creatures" in c or "each creature" in c:
+		matched_group = true
 		for p in all_perms:
 			if is_instance_valid(p) and MagicRules.is_creature(p.card_data): result.append(p)
-		return result
-	if "creatures you control" in c:
+	elif "creatures you control" in c:
+		matched_group = true
 		for p in all_perms:
 			if is_instance_valid(p) and MagicRules.is_creature(p.card_data) and engine.get_card_owner_id(p) == owner_id: result.append(p)
-		return result
-	if "creatures your opponents control" in c or "creatures you don't control" in c:
+	elif "creatures your opponents control" in c or "creatures you don't control" in c:
+		matched_group = true
 		for p in all_perms:
 			if is_instance_valid(p) and MagicRules.is_creature(p.card_data) and engine.get_card_owner_id(p) != owner_id: result.append(p)
-		return result
-	if "all artifacts" in c or "each artifact" in c:
+	elif "all artifacts" in c or "each artifact" in c:
+		matched_group = true
 		for p in all_perms:
 			if is_instance_valid(p) and "artifact" in MagicRules.get_card_type_line(p.card_data).to_lower(): result.append(p)
-		return result
-	if "all enchantments" in c or "each enchantment" in c:
+	elif "all enchantments" in c or "each enchantment" in c:
+		matched_group = true
 		for p in all_perms:
 			if is_instance_valid(p) and "enchantment" in MagicRules.get_card_type_line(p.card_data).to_lower(): result.append(p)
-		return result
-	if "all permanents" in c or "all nonland permanents" in c:
+	elif "all permanents" in c or "all nonland permanents" in c:
+		matched_group = true
 		var skip_lands := "nonland" in c
 		for p in all_perms:
 			if is_instance_valid(p):
 				if skip_lands and MagicRules.is_land(p.card_data): continue
 				result.append(p)
+
+	if matched_group:
+		if "with mana value " in c:
+			var mv := _extract_number(c, "with mana value ")
+			var filtered: Array[Node3D] = []
+			for p in result:
+				var p_mv := int(round(float(p.card_data.get("cmc", 0.0))))
+				if "or less" in c and p_mv <= mv: filtered.append(p)
+				elif ("or greater" in c or "or more" in c) and p_mv >= mv: filtered.append(p)
+				elif not ("or less" in c or "or greater" in c or "or more" in c) and p_mv == mv: filtered.append(p)
+			return filtered
 		return result
 
 	if target is Node3D and is_instance_valid(target): result.append(target)
@@ -621,14 +741,26 @@ static func _resolve_affected_permanents(c: String, source: Node3D, target: Vari
 
 static func _resolve_affected_players(c: String, _engine: Node, owner_id: int, target: Variant) -> Array[int]:
 	var pids: Array[int] = []
-	if "each player" in c: return [1, 2, 3, 4]
-	if "each opponent" in c:
+	var is_living := func(p: int) -> bool:
+		return _engine == null or int(_engine.player_life.get(p, 40)) > 0
+	if "each player" in c:
 		for pid in [1, 2, 3, 4]:
-			if pid != owner_id: pids.append(pid)
+			if is_living.call(pid): pids.append(pid)
+		return pids
+	var includes_you: bool = ("you and " in c or "and you " in c or "you each" in c)
+	if "each opponent" in c:
+		if includes_you and is_living.call(owner_id):
+			pids.append(owner_id)
+		for pid in [1, 2, 3, 4]:
+			if pid != owner_id and is_living.call(pid): pids.append(pid)
 		return pids
 	if "target opponent" in c or "target player" in c:
-		if target is int: return [int(target)]
-		return [(owner_id % 4) + 1]
+		var tgt_pid: int = int(target) if target is int else ((owner_id % 4) + 1)
+		if includes_you and is_living.call(owner_id):
+			pids.append(owner_id)
+		if not (tgt_pid in pids) and is_living.call(tgt_pid):
+			pids.append(tgt_pid)
+		return pids
 	return [owner_id]
 
 static func _extract_number(text: String, prefix: String) -> int:
@@ -865,3 +997,68 @@ static func _handle_copy_spell(target: Variant, engine: Node, _owner_id: int) ->
 		if engine.has_method("_finalize_push_ability_to_stack"):
 			var tgt_ref: Variant = t_node.get_meta("chosen_target") if t_node.has_meta("chosen_target") else null
 			engine._finalize_push_ability_to_stack(t_node, copy_obj, "Spell Copy", tgt_ref)
+
+static func _handle_put_linked_exile_to_gy(source: Node3D, engine: Node) -> void:
+	if not engine: return
+	engine.set_meta("last_linked_exile_card", {})
+	if not source or not is_instance_valid(source) or not source.has_meta("linked_exiled_cards"):
+		return
+	var linked: Array = source.get_meta("linked_exiled_cards")
+	if linked.is_empty():
+		return
+	var entry: Variant = linked.pop_front()
+	source.set_meta("linked_exiled_cards", linked)
+	if entry is Node3D and is_instance_valid(entry):
+		engine.set_meta("last_linked_exile_card", entry.card_data.duplicate() if "card_data" in entry else {})
+		if engine.zone_manager and engine.zone_manager.has_method("move_to_graveyard"):
+			engine.zone_manager.move_to_graveyard(entry)
+	elif entry is Dictionary:
+		engine.set_meta("last_linked_exile_card", entry.duplicate())
+
+static func _handle_put_on_library(c: String, source: Node3D, target: Variant, engine: Node) -> void:
+	if not engine or not engine.zone_manager: return
+	var card_to_move: Node3D = null
+	if "target" in c and target is Node3D and is_instance_valid(target):
+		card_to_move = target as Node3D
+	elif source != null and is_instance_valid(source):
+		card_to_move = source
+	if card_to_move == null: return
+	if "bottom" in c:
+		engine.zone_manager.move_to_bottom_library(card_to_move)
+	else:
+		engine.zone_manager.move_to_top_library(card_to_move)
+
+static func _handle_look_top_cards(c: String, engine: Node, owner_id: int) -> void:
+	if not engine: return
+	var amount := _extract_number(c, "top ")
+	var pick_count := 1
+	if "put " in c:
+		pick_count = maxi(1, _extract_number(c, "put "))
+	var dest_zone := "hand"
+	var rest_zone := "graveyard" if ("rest into your graveyard" in c or "rest into a graveyard" in c) else "bottom"
+	if owner_id == engine.local_player_id:
+		var top_cards: Array = []
+		for i in range(amount):
+			if engine.library_stack.is_empty(): break
+			var card_n: Node3D = engine.library_stack.pop_back()
+			if card_n.has_method("make_active"): card_n.make_active(card_n.card_data)
+			engine.connect_card_signals(card_n)
+			top_cards.append(card_n)
+		if not top_cards.is_empty() and engine.hud_manager and engine.hud_manager.has_method("open_look_and_pick_popup"):
+			engine.hud_manager.open_look_and_pick_popup(top_cards, mini(pick_count, top_cards.size()), dest_zone, rest_zone)
+	else:
+		var lib: Array = engine.player_libraries.get(owner_id, [])
+		var hand: Array = engine.player_hands.get(owner_id, [])
+		var picked := 0
+		for i in range(amount):
+			if lib.is_empty(): break
+			var card_n: Node3D = lib.pop_back()
+			if picked < pick_count:
+				picked += 1
+				hand.append(card_n)
+				if engine.zone_manager: engine.zone_manager.update_opponent_hand_positions(owner_id)
+			else:
+				if rest_zone == "graveyard" and engine.zone_manager:
+					engine.zone_manager.move_to_graveyard(card_n)
+				else:
+					lib.push_front(card_n)

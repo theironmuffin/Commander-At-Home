@@ -37,7 +37,7 @@ func schedule_ai_action(pid: int) -> void:
 	if tree == null:
 		_is_thinking = false
 		return
-	tree.create_timer(0.4).timeout.connect(func():
+	tree.create_timer(0.65).timeout.connect(func():
 		_is_thinking = false
 		if not is_instance_valid(engine): return
 		var tm: TurnManager = engine.turn_manager
@@ -55,12 +55,16 @@ func _execute_ai_step(pid: int) -> void:
 		_run_ai_combat_instant(pid)
 		tm.pass_priority()
 		return
+	var took_free_action := false
 	match tm.current_turn_phase:
 		TurnManager.TurnPhase.PRECOMBAT_MAIN, TurnManager.TurnPhase.POSTCOMBAT_MAIN:
-			_run_ai_main_phase(pid)
+			took_free_action = _run_ai_main_phase(pid)
 		TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS:
 			_run_ai_attackers(pid)
-	tm.pass_priority()
+	if took_free_action and engine.active_stack.is_empty():
+		schedule_ai_action(pid)
+	else:
+		tm.pass_priority()
 
 func _can_ai_respond_to_stack(pid: int) -> bool:
 	if engine.active_stack.is_empty(): return false
@@ -112,18 +116,18 @@ func _run_ai_stack_response(pid: int) -> void:
 			engine.zone_manager.move_to_stack(card)
 			return
 
-func _run_ai_main_phase(pid: int) -> void:
+func _run_ai_main_phase(pid: int) -> bool:
 	if not engine.turn_manager.can_act_sorcery_speed(pid):
-		return
+		return false
 	var opp_hand: Array = engine.player_hands.get(pid, [])
 
-	# 1. Play up to 1 land if not played this turn
+	# 1. Play 1 land and pause before casting spells so human players can follow each action
 	if not engine.land_played_this_turn:
 		for card in opp_hand.duplicate():
 			if not is_instance_valid(card): continue
 			if MagicRules.is_land(card.card_data):
 				_play_ai_land(card, pid)
-				break
+				return true
 
 	# 2. Cast at most 1 sorcery-speed spell per priority window (stack must resolve before casting another!)
 	var candidates: Array = []
@@ -155,7 +159,7 @@ func _run_ai_main_phase(pid: int) -> void:
 		if "instant" in type_line and not MagicRules.can_cast_at_instant_speed(card.card_data, 0, pid, engine):
 			continue
 		if ("sorcery" in type_line or "aura" in type_line) and ("target" in oracle_lower or "aura" in type_line):
-			var tgt: Variant = pick_ai_target(pid, oracle_lower)
+			var tgt: Variant = pick_ai_target(pid, oracle_lower, card)
 			if tgt == null: continue
 			card.set_meta("chosen_target", tgt)
 			if "target" in oracle_lower:
@@ -181,12 +185,13 @@ func _run_ai_main_phase(pid: int) -> void:
 			if card in engine.player_command_zones.get(pid, []):
 				engine.commander_cast_counts[card] = int(engine.commander_cast_counts.get(card, 0)) + 1
 			engine.zone_manager.move_to_stack(card)
-			return
+			return false
 
 	# 3. Activate Planeswalker loyalty & card-draw/utility abilities, then equip
 	if engine.active_stack.is_empty():
 		_activate_ai_planeswalkers_and_abilities(pid)
 		_equip_ai_equipment(pid)
+	return false
 
 func _score_ai_cast_priority(card: Node3D, pid: int) -> int:
 	var tl := MagicRules.get_card_type_line(card.card_data).to_lower()
@@ -417,6 +422,9 @@ func _activate_ai_planeswalkers_and_abilities(pid: int) -> void:
 			var eff_raw := str(ab.get("effect_raw", ""))
 			var eff_l := eff_raw.to_lower()
 			if "add " in eff_l or "sacrifice" in cost_raw.to_lower(): continue
+			if "exiled with" in eff_l or "exiled with" in cost_raw.to_lower():
+				var linked: Array = card.get_meta("linked_exiled_cards") if card.has_meta("linked_exiled_cards") else []
+				if linked.is_empty(): continue
 			if not ("draw " in eff_l or "create " in eff_l or "scry " in eff_l): continue
 			var needs_tap := "{T}" in cost_raw.to_upper()
 			if needs_tap and (card.is_tapped or (MagicRules.is_creature(card.card_data) and card.has_summoning_sickness)): continue
@@ -430,21 +438,57 @@ func _activate_ai_planeswalkers_and_abilities(pid: int) -> void:
 			engine._finalize_push_ability_to_stack(card, ab, "Activated", tgt)
 			return
 
-func pick_ai_target(ai_pid: int, effect_lower: String) -> Variant:
-	if "creature you control" in effect_lower:
+func pick_ai_target(ai_pid: int, effect_lower: String, source_card: Node3D = null) -> Variant:
+	var req := OracleParser.extract_target_requirement(effect_lower)
+	var tgt_zone := OracleParser.extract_target_zone(req)
+
+	if tgt_zone == "graveyard":
+		var best_gy: Node3D = null
+		var best_cmc := -1.0
+		var gy_pools: Array = []
+		if ai_pid == engine.local_player_id:
+			gy_pools.append(engine.graveyard_stack)
+		for p_key in engine.player_graveyards.keys():
+			gy_pools.append(engine.player_graveyards[p_key])
+		for pool in gy_pools:
+			for c in pool:
+				if not is_instance_valid(c): continue
+				if not MagicRules.is_legal_target(c, req, ai_pid, source_card): continue
+				var cmc_val: float = float(c.card_data.get("cmc", 0.0))
+				if cmc_val > best_cmc:
+					best_cmc = cmc_val
+					best_gy = c
+		return best_gy
+
+	if tgt_zone == "exile":
+		var ex_pools: Array = [engine.exile_stack]
+		for p_key in engine.player_exile.keys():
+			ex_pools.append(engine.player_exile[p_key])
+		for pool in ex_pools:
+			for c in pool:
+				if is_instance_valid(c) and MagicRules.is_legal_target(c, req, ai_pid, source_card):
+					return c
+		return null
+
+	if tgt_zone == "stack":
+		return null
+
+	if "creature you control" in effect_lower or "aura" in effect_lower:
 		var best_own: Node3D = null
 		var best_p := -1
 		for c in engine.battlefield_non_lands:
 			if is_instance_valid(c) and c.is_on_battlefield and MagicRules.is_creature(c.card_data) and engine.get_card_owner_id(c) == ai_pid:
+				if not req.is_empty() and not MagicRules.is_legal_target(c, req, ai_pid, source_card): continue
 				if int(c.dynamic_power) > best_p:
 					best_p = int(c.dynamic_power)
 					best_own = c
 		return best_own
-	if "creature" in effect_lower or "permanent" in effect_lower:
+	if "creature" in effect_lower or "permanent" in effect_lower or "artifact" in effect_lower or "enchantment" in effect_lower:
 		var best_opp: Node3D = null
 		var best_threat := -1
-		for c in engine.battlefield_non_lands:
-			if is_instance_valid(c) and c.is_on_battlefield and MagicRules.is_creature(c.card_data) and engine.get_card_owner_id(c) != ai_pid:
+		for c in engine.battlefield_non_lands + engine.battlefield_lands:
+			if is_instance_valid(c) and c.is_on_battlefield and engine.get_card_owner_id(c) != ai_pid:
+				if not req.is_empty() and not MagicRules.is_legal_target(c, req, ai_pid, source_card): continue
 				var threat: int = int(c.dynamic_power) + int(c.dynamic_toughness) + (5 if (c.has_meta("is_commander") and bool(c.get_meta("is_commander"))) else 0)
 				if threat > best_threat:
 					best_threat = threat
@@ -467,7 +511,7 @@ func _run_ai_combat_instant(pid: int) -> void:
 		if not MagicRules.can_cast_at_instant_speed(card.card_data, 0, pid, engine): continue
 		var ol := str(MagicRules.get_card_attribute(card.card_data, "oracle_text", "")).to_lower()
 		if not ("destroy target" in ol or "exile target" in ol or "deals " in ol): continue
-		var tgt: Variant = pick_ai_target(pid, ol)
+		var tgt: Variant = pick_ai_target(pid, ol, card)
 		if tgt == null: continue
 		var raw_cost := str(card.card_data.get("mana_cost", ""))
 		var red := ContinuousEffectsEngine.get_cost_reduction(card.card_data, pid, engine.battlefield_lands, engine.battlefield_non_lands)

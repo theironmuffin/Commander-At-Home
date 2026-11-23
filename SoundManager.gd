@@ -9,15 +9,19 @@ var _players: Array[AudioStreamPlayer] = []
 var _next_player_idx: int = 0
 var _muted: bool = false
 var _last_stack_size: int = 0
+var master_volume: float = 0.85
+var sfx_volume: float = 0.85
+const AUDIO_SETTINGS_PATH := "user://audio_settings.json"
 
 func _ready() -> void:
 	name = "SoundManager"
+	_load_audio_settings()
 	_bake_all_streams()
 	for i in range(POOL_SIZE):
 		var p := AudioStreamPlayer.new()
-		p.volume_db = -10.0
 		add_child(p)
 		_players.append(p)
+	_apply_volumes()
 
 	var eb := get_node_or_null("/root/EventBus")
 	if eb:
@@ -72,17 +76,55 @@ func _on_stack_changed(stack_size: int) -> void:
 		play_sfx("cast")
 	_last_stack_size = stack_size
 
+func _load_audio_settings() -> void:
+	if FileAccess.file_exists(AUDIO_SETTINGS_PATH):
+		var f := FileAccess.open(AUDIO_SETTINGS_PATH, FileAccess.READ)
+		if f:
+			var j := JSON.new()
+			if j.parse(f.get_as_text()) == OK and j.get_data() is Dictionary:
+				var d: Dictionary = j.get_data()
+				master_volume = clampf(float(d.get("master_volume", 0.85)), 0.0, 1.0)
+				sfx_volume = clampf(float(d.get("sfx_volume", 0.85)), 0.0, 1.0)
+				_muted = bool(d.get("muted", false))
+
+func _save_audio_settings() -> void:
+	var f := FileAccess.open(AUDIO_SETTINGS_PATH, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify({"master_volume": master_volume, "sfx_volume": sfx_volume, "muted": _muted}))
+
+func _apply_volumes() -> void:
+	var combined: float = master_volume * sfx_volume
+	var db: float = -80.0 if (_muted or combined <= 0.001) else linear_to_db(combined) - 4.0
+	for p in _players:
+		if is_instance_valid(p):
+			p.volume_db = db
+
+func set_master_volume(val: float) -> void:
+	master_volume = clampf(val, 0.0, 1.0)
+	_apply_volumes()
+	_save_audio_settings()
+
+func set_sfx_volume(val: float) -> void:
+	sfx_volume = clampf(val, 0.0, 1.0)
+	_apply_volumes()
+	_save_audio_settings()
+
 func set_muted(muted: bool) -> void:
 	_muted = muted
+	_apply_volumes()
+	_save_audio_settings()
 
 func play_sfx(sfx_name: String) -> void:
-	if _muted or _players.is_empty(): return
+	if _muted or _players.is_empty() or (master_volume * sfx_volume) <= 0.001: return
 	var stream: AudioStreamWAV = _streams.get(sfx_name, null)
 	if stream == null: return
 	var p := _players[_next_player_idx]
 	_next_player_idx = (_next_player_idx + 1) % _players.size()
 	p.stream = stream
-	p.pitch_scale = randf_range(0.96, 1.04)
+	if sfx_name in ["tap", "draw", "hit", "land", "shuffle"]:
+		p.pitch_scale = randf_range(0.91, 1.09)
+	else:
+		p.pitch_scale = randf_range(0.96, 1.04)
 	p.play()
 
 func _bake_all_streams() -> void:

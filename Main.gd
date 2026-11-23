@@ -19,35 +19,35 @@ static var EQUIP_COST_REGEX: RegEx
 @export var max_hand_width: float = 1.8
 
 @export_category("Library Settings")
-@export var library_x: float = -3.0
+@export var library_x: float = -3.85
 @export var library_y: float = 0.01
 @export var library_z: float = 4.0
 @export var card_thickness: float = 0.003
 
 @export_category("Graveyard Settings")
-@export var graveyard_x: float = -3.0
+@export var graveyard_x: float = -3.85
 @export var graveyard_y: float = 0.01
 @export var graveyard_z: float = 5.2
 
 @export_category("Command Zone Settings")
-@export var command_zone_x: float = -3.0
+@export var command_zone_x: float = -2.75
 @export var command_zone_y: float = 0.01
-@export var command_zone_z: float = 2.8
+@export var command_zone_z: float = 2.65
 
 @export_category("Exile Settings")
-@export var exile_x: float = -4.2
+@export var exile_x: float = -4.95
 @export var exile_y: float = 0.01
 @export var exile_z: float = 5.2
 
 @export_category("Battlefield Lands Settings")
 @export var battlefield_lands_start_x: float = -1.5
-@export var battlefield_lands_y: float = 0.01
+@export var battlefield_lands_y: float = 0.028
 @export var battlefield_lands_z: float = 5.2
 @export var battlefield_lands_spacing_x: float = 0.7
 
 @export_category("Battlefield Non-Lands Settings")
 @export var battlefield_non_lands_start_x: float = -1.5
-@export var battlefield_non_lands_y: float = 0.01
+@export var battlefield_non_lands_y: float = 0.028
 @export var battlefield_non_lands_z: float = 4.0
 @export var battlefield_non_lands_spacing_x: float = 0.7
 @export var max_battlefield_width: float = 5.6
@@ -110,6 +110,7 @@ var mulligan_count: int = 0
 var mulligan_bottom_remaining: int = 0
 var hovered_card: Node3D = null
 var _last_upkeep_trigger_key: String = ""
+var _last_combat_begin_trigger_key: String = ""
 var spells_cast_this_turn: int = 0
 var undo_stack: Array[Dictionary] = []
 const SAVE_GAME_PATH = "user://savegame.json"
@@ -191,16 +192,13 @@ func _ready() -> void:
 	network_manager.match_start_received.connect(_on_network_match_start)
 
 	setup_tabletop_layout()
-	var table_mesh: MeshInstance3D = $tableSurface
-	if table_mesh:
-		var mat := StandardMaterial3D.new()
-		mat.albedo_texture = load("res://tableSurface.jpg")
-		mat.roughness = 0.6
-		table_mesh.set_surface_override_material(0, mat)
+	_load_table_settings()
+	apply_playmat_theme(current_playmat_theme)
 
 	if OS.get_name() == "Android":
 		Input.set_use_accumulated_input(true)
 	_load_player_sleeves()
+	_load_player_playmats()
 	_setup_zone_anchors()
 	_setup_targeting_arcs()
 	_setup_controller_cursor()
@@ -216,8 +214,27 @@ func _ready() -> void:
 		refresh_command_info_stations()
 		if amt > 0 and t is Node3D and is_instance_valid(t):
 			spawn_floating_3d_text(t, "-%d" % amt, Color(1.0, 0.35, 0.25))
+			if amt >= 3:
+				spawn_impact_vfx((t as Node3D).global_position, Color(1.0, 0.45, 0.15), 0.85)
 	)
-	EventBus.turn_changed.connect(func(_pid, _t): refresh_command_info_stations())
+	EventBus.card_died.connect(func(c):
+		if is_instance_valid(c):
+			spawn_impact_vfx(c.global_position, Color(0.95, 0.25, 0.22), 1.0)
+	)
+	EventBus.card_entered_battlefield.connect(func(c, _z):
+		if is_instance_valid(c) and c.has_meta("is_commander") and bool(c.get_meta("is_commander")):
+			spawn_impact_vfx(c.global_position, Color(1.0, 0.84, 0.28), 1.35)
+	)
+	EventBus.turn_changed.connect(func(_pid, _t):
+		refresh_command_info_stations()
+		refresh_playable_card_glows()
+	)
+	EventBus.phase_changed.connect(func(_p): refresh_playable_card_glows())
+	EventBus.priority_changed.connect(func(_pid, _c): refresh_playable_card_glows())
+	EventBus.mana_pool_changed.connect(func(_m): refresh_playable_card_glows())
+	EventBus.stack_changed.connect(func(_s): refresh_playable_card_glows())
+	EventBus.card_entered_battlefield.connect(func(_c, _z): refresh_playable_card_glows())
+	EventBus.card_died.connect(func(_c): refresh_playable_card_glows())
 	deck_loader.show_deck_selector_ui()
 
 static func _initialize_regex_cache() -> void:
@@ -352,6 +369,91 @@ func set_player_dungeon(pid: int, dungeon_name: String, room_num: int) -> void:
 
 func get_player_display_name(pid: int) -> String:
 	return str(player_display_names.get(pid, "Player %d" % pid))
+
+const PLAYER_PLAYMATS_SAVE_PATH := "user://player_playmats.json"
+var player_playmats: Dictionary = {}
+var player_playmat_meshes: Dictionary = {}
+var _default_player_playmat_tex: Texture2D = null
+
+func _get_default_player_playmat_texture() -> Texture2D:
+	if _default_player_playmat_tex != null:
+		return _default_player_playmat_tex
+	var w := 512
+	var h := 256
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new(); rng.seed = 108
+	for y in range(h):
+		for x in range(w):
+			var nx := absf((float(x) / float(w)) * 2.0 - 1.0)
+			var ny := absf((float(y) / float(h)) * 2.0 - 1.0)
+			var edge := maxf(nx, ny)
+			var grain := rng.randf_range(-0.015, 0.015)
+			var base_r := 0.09 - edge * 0.03 + grain
+			var base_g := 0.11 - edge * 0.03 + grain
+			var base_b := 0.15 - edge * 0.03 + grain
+			# Stitched gold double border
+			var is_outer := (x >= 8 and x <= w - 9 and y >= 8 and y <= h - 9) and (x < 11 or x > w - 12 or y < 11 or y > h - 12)
+			var is_inner := (x >= 16 and x <= w - 17 and y >= 16 and y <= h - 17) and (x < 18 or x > w - 19 or y < 18 or y > h - 19)
+			if is_outer or is_inner:
+				if ((x + y) % 6) < 4:
+					img.set_pixel(x, y, Color(0.78, 0.63, 0.28, 1.0))
+				else:
+					img.set_pixel(x, y, Color(base_r, base_g, base_b, 1.0))
+			else:
+				# Subtle center ring emblem
+				var dx := float(x - w / 2)
+				var dy := float(y - h / 2)
+				var rad := sqrt(dx * dx + dy * dy)
+				if absf(rad - 54.0) < 1.6 or absf(rad - 42.0) < 1.1:
+					img.set_pixel(x, y, Color(0.58, 0.48, 0.24, 1.0))
+				else:
+					img.set_pixel(x, y, Color(clampf(base_r, 0.0, 1.0), clampf(base_g, 0.0, 1.0), clampf(base_b, 0.0, 1.0), 1.0))
+	_default_player_playmat_tex = ImageTexture.create_from_image(img)
+	return _default_player_playmat_tex
+
+func _load_player_playmats() -> void:
+	if not FileAccess.file_exists(PLAYER_PLAYMATS_SAVE_PATH): return
+	var f := FileAccess.open(PLAYER_PLAYMATS_SAVE_PATH, FileAccess.READ)
+	if not f: return
+	var json := JSON.new()
+	if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
+		var d: Dictionary = json.get_data()
+		for k in d.keys():
+			var pid := int(k)
+			var p := str(d[k])
+			if not p.is_empty() and FileAccess.file_exists(p):
+				set_player_playmat(pid, p, false)
+
+func _save_player_playmats() -> void:
+	var f := FileAccess.open(PLAYER_PLAYMATS_SAVE_PATH, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(player_playmats))
+
+func set_player_playmat(pid: int, file_path: String, save_to_disk: bool = true) -> void:
+	var tex: Texture2D = null
+	if file_path.is_empty() or not FileAccess.file_exists(file_path):
+		player_playmats[pid] = ""
+		tex = _get_default_player_playmat_texture()
+	else:
+		var img := Image.load_from_file(file_path)
+		if img and not img.is_empty():
+			if img.get_width() > 1024 or img.get_height() > 1024:
+				img.resize(mini(img.get_width(), 1024), mini(img.get_height(), 1024), Image.INTERPOLATE_LANCZOS)
+			tex = ImageTexture.create_from_image(img)
+			player_playmats[pid] = file_path
+		else:
+			player_playmats[pid] = ""
+			tex = _get_default_player_playmat_texture()
+	if player_playmat_meshes.has(pid) and is_instance_valid(player_playmat_meshes[pid]):
+		var mi: MeshInstance3D = player_playmat_meshes[pid]
+		var top_art: MeshInstance3D = mi.get_node_or_null("TopArt")
+		var target_mi: MeshInstance3D = top_art if top_art != null else mi
+		var mat := StandardMaterial3D.new()
+		mat.albedo_texture = tex
+		mat.roughness = 0.78
+		target_mi.set_surface_override_material(0, mat)
+	if save_to_disk:
+		_save_player_playmats()
 
 func _load_player_sleeves() -> void:
 	if not FileAccess.file_exists(SLEEVES_SAVE_PATH): return
@@ -717,6 +819,135 @@ func _setup_command_info_stations() -> void:
 		root.add_child(st_lbl)
 		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl, "status": st_lbl, "border_mat": b_mat}
 
+const TABLE_SETTINGS_PATH := "user://table_settings.json"
+const TABLE_SURFACES := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment"]
+var current_playmat_theme: String = "classic_felt"
+
+func _load_table_settings() -> void:
+	if FileAccess.file_exists(TABLE_SETTINGS_PATH):
+		var f := FileAccess.open(TABLE_SETTINGS_PATH, FileAccess.READ)
+		if f:
+			var j := JSON.new()
+			if j.parse(f.get_as_text()) == OK and j.get_data() is Dictionary:
+				var d: Dictionary = j.get_data()
+				var loaded_t := str(d.get("playmat_theme", "classic_felt"))
+				current_playmat_theme = loaded_t if loaded_t in TABLE_SURFACES else "classic_felt"
+
+func _save_table_settings() -> void:
+	var f := FileAccess.open(TABLE_SETTINGS_PATH, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify({"playmat_theme": current_playmat_theme}))
+
+func apply_playmat_theme(theme_id: String, _unused: String = "") -> void:
+	current_playmat_theme = theme_id if theme_id in TABLE_SURFACES else "classic_felt"
+	_save_table_settings()
+	var table_mesh: MeshInstance3D = get_node_or_null("tableSurface")
+	if not table_mesh: return
+	var mat := StandardMaterial3D.new()
+	match current_playmat_theme:
+		"dark_slate":
+			var nt := NoiseTexture2D.new()
+			var fnl := FastNoiseLite.new(); fnl.frequency = 0.04
+			nt.noise = fnl; nt.width = 256; nt.height = 256
+			mat.albedo_texture = nt
+			mat.albedo_color = Color(0.18, 0.21, 0.27, 1.0)
+			mat.roughness = 0.82
+		"wood":
+			var wt := NoiseTexture2D.new()
+			var wnl := FastNoiseLite.new(); wnl.frequency = 0.015; wnl.fractal_octaves = 4
+			wt.noise = wnl; wt.width = 256; wt.height = 256
+			mat.albedo_texture = wt
+			mat.albedo_color = Color(0.45, 0.27, 0.14, 1.0)
+			mat.roughness = 0.52
+		"starfield":
+			var simg := Image.create(256, 256, false, Image.FORMAT_RGB8)
+			simg.fill(Color(0.05, 0.06, 0.14))
+			var rng := RandomNumberGenerator.new(); rng.seed = 42
+			for _s in range(180):
+				var sx := rng.randi_range(0, 255); var sy := rng.randi_range(0, 255)
+				var br := rng.randf_range(0.55, 1.0)
+				simg.set_pixel(sx, sy, Color(br * 0.85, br * 0.92, br))
+			mat.albedo_texture = ImageTexture.create_from_image(simg)
+			mat.roughness = 0.45
+			mat.uv1_scale = Vector3(4, 4, 1)
+		"crimson_velvet":
+			var vt := NoiseTexture2D.new()
+			var vnl := FastNoiseLite.new(); vnl.frequency = 0.08
+			vt.noise = vnl; vt.width = 256; vt.height = 256
+			mat.albedo_texture = vt
+			mat.albedo_color = Color(0.38, 0.09, 0.12, 1.0)
+			mat.roughness = 0.88
+		"emerald_marble":
+			var mt := NoiseTexture2D.new()
+			var mnl := FastNoiseLite.new(); mnl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; mnl.frequency = 0.025; mnl.fractal_type = FastNoiseLite.FRACTAL_RIDGED
+			mt.noise = mnl; mt.width = 256; mt.height = 256
+			mat.albedo_texture = mt
+			mat.albedo_color = Color(0.14, 0.34, 0.25, 1.0)
+			mat.roughness = 0.32
+		"obsidian_grid":
+			var gimg := Image.create(128, 128, false, Image.FORMAT_RGB8)
+			gimg.fill(Color(0.06, 0.07, 0.10))
+			for gx in range(128):
+				gimg.set_pixel(gx, 0, Color(0.16, 0.36, 0.45))
+				gimg.set_pixel(0, gx, Color(0.16, 0.36, 0.45))
+			mat.albedo_texture = ImageTexture.create_from_image(gimg)
+			mat.roughness = 0.40
+			mat.uv1_scale = Vector3(12, 12, 1)
+		"parchment":
+			var pt := NoiseTexture2D.new()
+			var pnl := FastNoiseLite.new(); pnl.frequency = 0.03; pnl.fractal_octaves = 3
+			pt.noise = pnl; pt.width = 256; pt.height = 256
+			mat.albedo_texture = pt
+			mat.albedo_color = Color(0.68, 0.58, 0.42, 1.0)
+			mat.roughness = 0.85
+		_:
+			mat.albedo_texture = load("res://tableSurface.jpg")
+			mat.roughness = 0.65
+	table_mesh.set_surface_override_material(0, mat)
+
+func spawn_impact_vfx(world_pos: Vector3, col: Color, scale_mult: float = 1.0) -> void:
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.22 * scale_mult
+	torus.outer_radius = 0.30 * scale_mult
+	ring.mesh = torus
+	var rmat := StandardMaterial3D.new()
+	rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	rmat.albedo_color = Color(col.r, col.g, col.b, 0.9)
+	ring.material_override = rmat
+	add_child(ring)
+	ring.global_position = world_pos + Vector3(0.0, 0.08, 0.0)
+	ring.scale = Vector3(0.35, 1.0, 0.35)
+	var rtw := create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	rtw.tween_property(ring, "scale", Vector3(2.4 * scale_mult, 0.5, 2.4 * scale_mult), 0.42)
+	rtw.tween_property(rmat, "albedo_color:a", 0.0, 0.42)
+	rtw.chain().tween_callback(func():
+		if is_instance_valid(ring): ring.queue_free()
+	)
+	var spark_mesh := BoxMesh.new()
+	spark_mesh.size = Vector3(0.06, 0.06, 0.06) * scale_mult
+	for i in range(10):
+		var sp := MeshInstance3D.new()
+		sp.mesh = spark_mesh
+		var smat := StandardMaterial3D.new()
+		smat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		smat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		smat.albedo_color = col
+		sp.material_override = smat
+		add_child(sp)
+		sp.global_position = world_pos + Vector3(0.0, 0.12, 0.0)
+		var ang := float(i) * (TAU / 10.0) + randf_range(-0.2, 0.2)
+		var dist := randf_range(0.55, 1.15) * scale_mult
+		var dest := sp.global_position + Vector3(cos(ang) * dist, randf_range(0.25, 0.65), sin(ang) * dist)
+		var stw := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		stw.tween_property(sp, "global_position", dest, 0.40)
+		stw.tween_property(sp, "scale", Vector3(0.1, 0.1, 0.1), 0.40)
+		stw.tween_property(smat, "albedo_color:a", 0.0, 0.40)
+		stw.chain().tween_callback(func():
+			if is_instance_valid(sp): sp.queue_free()
+		)
+
 func spawn_floating_3d_text(target: Variant, text_str: String, col: Color) -> void:
 	var world_pos := Vector3.ZERO
 	if target is Node3D and is_instance_valid(target):
@@ -791,7 +1022,7 @@ func refresh_command_info_stations() -> void:
 				b_mat.albedo_color = Color(0.28, 0.16, 0.16, 1.0)
 				b_mat.emission_enabled = false
 			elif int(pid) == act_pid:
-				var glow_col := Color(0.35, 0.95, 0.55) if int(pid) == local_player_id else Color(1.0, 0.82, 0.32)
+				var glow_col := Color(0.35, 0.95, 0.55)
 				b_mat.albedo_color = glow_col
 				b_mat.emission_enabled = true
 				b_mat.emission = glow_col
@@ -804,10 +1035,10 @@ func setup_tabletop_layout() -> void:
 	central_stack_anchor = _create_anchor("CentralStack", Vector3(0.0, 0.55, 0.0))
 	_setup_command_info_stations()
 	var configs := [
-		{"id": 1, "station_pos": Vector3(0.0, 0.0, 5.5), "rotation_y": 0.0, "lib": Vector3(-3.0, 0.01, 4.0), "gy": Vector3(-3.0, 0.01, 5.0), "cmd": Vector3(-3.0, 0.01, 3.0), "hand_pos": Vector3(0.0, -1.0, 6.8)},
-		{"id": 2, "station_pos": Vector3(5.5, 0.0, 0.0), "rotation_y": -PI / 2.0, "lib": Vector3(-3.0, 0.01, 9.6), "gy": Vector3(-3.0, 0.01, 10.6), "cmd": Vector3(-3.0, 0.01, 8.6), "hand_pos": Vector3(6.8, -1.0, 0.0)},
-		{"id": 3, "station_pos": Vector3(0.0, 0.0, -5.5), "rotation_y": PI, "lib": Vector3(-3.0, 0.01, -1.4), "gy": Vector3(-3.0, 0.01, -0.4), "cmd": Vector3(-3.0, 0.01, -2.4), "hand_pos": Vector3(0.0, -1.0, -6.8)},
-		{"id": 4, "station_pos": Vector3(-5.5, 0.0, 0.0), "rotation_y": PI / 2.0, "lib": Vector3(-2.8, 0.01, 9.6), "gy": Vector3(-2.8, 0.01, 10.6), "cmd": Vector3(-2.8, 0.01, 8.6), "hand_pos": Vector3(-6.8, -1.0, 0.0)}
+		{"id": 1, "station_pos": Vector3(0.0, 0.0, 5.5), "rotation_y": 0.0, "lib": Vector3(-3.85, 0.01, 4.0), "gy": Vector3(-3.85, 0.01, 5.0), "cmd": Vector3(-2.75, 0.01, 2.65), "hand_pos": Vector3(0.0, -1.0, 6.8)},
+		{"id": 2, "station_pos": Vector3(5.5, 0.0, 0.0), "rotation_y": -PI / 2.0, "lib": Vector3(-3.85, 0.01, 9.6), "gy": Vector3(-3.85, 0.01, 10.6), "cmd": Vector3(-2.75, 0.01, 8.15), "hand_pos": Vector3(6.8, -1.0, 0.0)},
+		{"id": 3, "station_pos": Vector3(0.0, 0.0, -5.5), "rotation_y": PI, "lib": Vector3(-3.85, 0.01, -1.4), "gy": Vector3(-3.85, 0.01, -0.4), "cmd": Vector3(-2.75, 0.01, -2.85), "hand_pos": Vector3(0.0, -1.0, -6.8)},
+		{"id": 4, "station_pos": Vector3(-5.5, 0.0, 0.0), "rotation_y": PI / 2.0, "lib": Vector3(-3.85, 0.01, 9.6), "gy": Vector3(-3.85, 0.01, 10.6), "cmd": Vector3(-2.75, 0.01, 8.15), "hand_pos": Vector3(-6.8, -1.0, 0.0)}
 	]
 	for cfg in configs:
 		var pid: int = cfg["id"]
@@ -820,9 +1051,38 @@ func setup_tabletop_layout() -> void:
 		var lib_anchor := _create_anchor_child("LibraryAnchor", cfg["lib"], station)
 		var gy_anchor := _create_anchor_child("GraveyardAnchor", cfg["gy"], station)
 		var cmd_anchor := _create_anchor_child("CommandZoneAnchor", cfg["cmd"], station)
-		var exile_anc := _create_anchor_child("ExileAnchor", cfg["gy"] + Vector3(-1.2, 0.0, 0.0), station)
-		var lands_anc := _create_anchor_child("BattlefieldLandsAnchor", Vector3(0.0, 0.01, cfg["gy"].z), station)
-		var non_lands_anc := _create_anchor_child("BattlefieldNonLandsAnchor", Vector3(0.0, 0.01, cfg["lib"].z), station)
+		var exile_anc := _create_anchor_child("ExileAnchor", cfg["gy"] + Vector3(-1.1, 0.0, 0.0), station)
+		var lands_anc := _create_anchor_child("BattlefieldLandsAnchor", Vector3(0.0, 0.028, cfg["gy"].z), station)
+		var non_lands_anc := _create_anchor_child("BattlefieldNonLandsAnchor", Vector3(0.0, 0.028, cfg["lib"].z), station)
+
+		var pm_mesh := MeshInstance3D.new()
+		pm_mesh.name = "Player_%d_Playmat" % pid
+		var pm_box := BoxMesh.new()
+		pm_box.size = Vector3(6.2, 0.018, 2.55)
+		pm_mesh.mesh = pm_box
+		var edge_mat := StandardMaterial3D.new()
+		edge_mat.albedo_color = Color(0.07, 0.08, 0.11, 1.0)
+		edge_mat.roughness = 0.85
+		pm_mesh.set_surface_override_material(0, edge_mat)
+
+		var top_art := MeshInstance3D.new()
+		top_art.name = "TopArt"
+		var pm_plane := PlaneMesh.new()
+		pm_plane.size = Vector2(6.2, 2.55)
+		top_art.mesh = pm_plane
+		top_art.position = Vector3(0.0, 0.0092, 0.0)
+		var pm_mat := StandardMaterial3D.new()
+		pm_mat.albedo_texture = _get_default_player_playmat_texture()
+		pm_mat.roughness = 0.78
+		top_art.set_surface_override_material(0, pm_mat)
+		pm_mesh.add_child(top_art)
+		if pid == local_player_id:
+			add_child(pm_mesh)
+			pm_mesh.position = Vector3(0.0, 0.009, 4.6)
+		else:
+			station.add_child(pm_mesh)
+			pm_mesh.position = Vector3(0.0, 0.009, (cfg["gy"].z + cfg["lib"].z) * 0.5)
+		player_playmat_meshes[pid] = pm_mesh
 
 		var hand_cont: Node3D = null
 		if pid == local_player_id:
@@ -1037,6 +1297,11 @@ func _on_phase_changed_triggers(new_phase: int) -> void:
 		if turn_key != _last_upkeep_trigger_key:
 			_last_upkeep_trigger_key = turn_key
 			check_and_queue_triggers("UPKEEP", null)
+	elif new_phase == TurnManager.TurnPhase.COMBAT_BEGIN:
+		var cb_key := "%d_%d" % [turn_manager.turn_number, turn_manager.active_player_id]
+		if cb_key != _last_combat_begin_trigger_key:
+			_last_combat_begin_trigger_key = cb_key
+			check_and_queue_triggers("COMBAT_BEGIN", null)
 	elif new_phase == TurnManager.TurnPhase.END:
 		check_and_queue_triggers("END_STEP", null)
 
@@ -1087,21 +1352,39 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 
 			if event_name == "ETB" and src_valid and ("enters the battlefield" in event_raw or "enters" in event_raw):
 				if "enters tapped" in event_raw or "enters with" in event_raw: continue
-				var is_self: bool = ("this " in event_raw or "~" in event_raw or (not perm_name.is_empty() and perm_name in event_raw)) and not ("another" in event_raw)
+				var face_name := perm_name.split(" // ")[0].strip_edges()
+				var short_name := face_name.split(",")[0].strip_edges() if "," in face_name else face_name
+				var has_self_name: bool = (not face_name.is_empty() and face_name in event_raw) or (short_name.length() >= 3 and (("when " + short_name + " ") in event_raw or ("whenever " + short_name + " ") in event_raw or (" " + short_name + " enters") in event_raw))
+				var is_self: bool = ("this " in event_raw or "~" in event_raw or has_self_name) and not ("another" in event_raw)
 				if is_self:
 					if perm == source_card: matched = true
 				elif not ("another" in event_raw and perm == source_card):
+					var watches_group := ("permanent" in event_raw or "creature" in event_raw or "land" in event_raw or "artifact" in event_raw or "enchantment" in event_raw or "planeswalker" in event_raw or "token" in event_raw or "another" in event_raw or "one or more" in event_raw)
+					if not watches_group: continue
 					if "you control" in event_raw and src_owner != perm_owner: continue
-					if "creature" in event_raw and not ("creature" in src_type): continue
-					if "land" in event_raw and not ("land" in src_type): continue
-					if "artifact" in event_raw and not ("artifact" in src_type): continue
-					if "enchantment" in event_raw and not ("enchantment" in src_type): continue
+					if "an opponent controls" in event_raw and src_owner == perm_owner: continue
+					if "nontoken" in event_raw and bool(source_card.is_token if "is_token" in source_card else false): continue
+					if "noncreature" in event_raw and ("creature" in src_type): continue
+					if "creature" in event_raw and not ("noncreature" in event_raw) and not ("creature" in src_type): continue
+					if "land" in event_raw and not ("nonland" in event_raw) and not ("land" in src_type): continue
+					if "artifact" in event_raw and not ("nonartifact" in event_raw) and not ("artifact" in src_type): continue
+					if "enchantment" in event_raw and not ("nonenchantment" in event_raw) and not ("enchantment" in src_type): continue
 					matched = true
 			elif event_name == "DIE" and src_valid and ("dies" in event_raw or "put into a graveyard" in event_raw):
 				if source_card == perm or ("another" in event_raw and source_card != perm) or ("a creature" in event_raw and "creature" in src_type):
 					matched = true
 			elif event_name == "UPKEEP" and "beginning of" in event_raw and "upkeep" in event_raw:
 				if "your upkeep" in event_raw and perm_owner != turn_manager.active_player_id: continue
+				matched = true
+			elif event_name == "COMBAT_BEGIN" and "beginning of combat" in event_raw:
+				if ("on your turn" in event_raw or "your combat" in event_raw) and perm_owner != turn_manager.active_player_id: continue
+				var eff_cb := str(trig.get("effect_raw", "")).to_lower()
+				var req_cnt := OracleParser.count_required_targets(eff_cb)
+				if req_cnt > 0:
+					var req_str := str(trig.get("target_requirement", ""))
+					if req_str.is_empty(): req_str = OracleParser.extract_target_requirement(eff_cb)
+					if not req_str.is_empty() and MagicRules.count_legal_targets(req_str, perm_owner, self, perm) < req_cnt:
+						continue
 				matched = true
 			elif event_name == "END_STEP" and "beginning of" in event_raw and "end step" in event_raw:
 				if "your end step" in event_raw and perm_owner != turn_manager.active_player_id: continue
@@ -1117,7 +1400,7 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 					matched = true
 			elif event_name == "CAST" and src_valid and "you cast" in event_raw and src_owner == perm_owner:
 				if "instant or sorcery" in event_raw and not ("instant" in src_type or "sorcery" in src_type): continue
-				if "creature spell" in event_raw and not ("creature" in src_type): continue
+				if "creature spell" in event_raw and not ("noncreature" in event_raw) and not ("creature" in src_type): continue
 				if "noncreature" in event_raw and ("creature" in src_type): continue
 				matched = true
 
@@ -1204,6 +1487,7 @@ func resolve_top_stack_card() -> void:
 				run_state_based_actions()
 				return
 		AbilityResolver.execute_effect_text(stack_item.effect_text, valid_src, stack_item.target_ref, self, stack_item.controller_id)
+		spawn_impact_vfx(valid_src.global_position if valid_src else Vector3(0.0, 0.25, 0.0), Color(0.45, 0.78, 1.0), 0.95)
 		EventBus.play_sfx("resolve")
 		event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": stack_item.name})
 		run_state_based_actions()
@@ -1571,6 +1855,8 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 			return
 
 	if button_index == MOUSE_BUTTON_RIGHT or (Input.is_key_pressed(KEY_SHIFT) and button_index == MOUSE_BUTTON_LEFT):
+		if get_card_owner_id(card_node) != local_player_id:
+			return
 		hud_manager.open_activated_abilities_menu(card_node)
 		return
 
@@ -1579,6 +1865,9 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 
 	if hud_manager.targeting_attachment != null:
 		zone_manager.attach_card_to_creature(hud_manager.targeting_attachment, card_node)
+		return
+
+	if get_card_owner_id(card_node) != local_player_id:
 		return
 
 	var mana_abilities := OracleParser.parse_mana_abilities(card_node.card_data, card_node)
@@ -1629,6 +1918,8 @@ func finish_mulligan_phase() -> void:
 	mulligan_phase_active = false
 	mulligan_bottom_remaining = 0
 	hud_manager.hide_mulligan_ui()
+	if hud_manager and hud_manager.has_method("set_game_setup_complete"):
+		hud_manager.set_game_setup_complete(true)
 	turn_manager.set_starting_player(starting_player_id)
 	turn_manager.advance_turn_phase(false)
 
@@ -1932,6 +2223,16 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 
 		var parsed_face: Dictionary = OracleParser.parse_oracle_text(str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_index)))
 		var face_name := str(MagicRules.get_card_attribute(card_node.card_data, "name", "SPELL", face_index))
+		var needs_cast_target := ("instant" in type_line or "sorcery" in type_line or "aura" in type_line)
+		var req_cnt := OracleParser.count_required_targets(oracle_lower) if needs_cast_target else 0
+		if req_cnt > 0:
+			var req_str := OracleParser.extract_target_requirement(oracle_lower)
+			if not req_str.is_empty():
+				var avail_cnt := MagicRules.count_legal_targets(req_str, local_player_id, self, card_node)
+				if avail_cnt < req_cnt:
+					if hud_manager and hud_manager.has_method("show_toast"):
+						hud_manager.show_toast("Cannot cast %s — not enough legal targets (%d needed)" % [face_name, req_cnt])
+					return
 		var modal_info: Dictionary = parsed_face.get("modal", {})
 		var add_cost: Dictionary = parsed_face.get("additional_cost", {})
 
@@ -2041,6 +2342,62 @@ func get_max_available_x(mana_cost_str: String, payer_id: int = local_player_id)
 			total_avail += 1
 	return maxi(0, (total_avail - non_x_cost) / x_count)
 
+func can_player_potentially_afford(mana_cost_str: String, pid: int = local_player_id, spell_context: Dictionary = {}) -> bool:
+	if mana_cost_str.is_empty() or mana_cost_str == "{}" or mana_cost_str == "0":
+		return true
+	var avail_total := 0
+	var avail_colors := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
+	if pid == local_player_id:
+		for ck in mana_pool.keys():
+			var amt: int = int(mana_pool[ck])
+			avail_total += amt
+			if avail_colors.has(ck): avail_colors[ck] += amt
+		for rm in restricted_mana:
+			if not spell_context.is_empty() and not _does_mana_match_context(str(rm.get("restriction", "")), str(rm.get("chosen_type", "")), spell_context):
+				continue
+			avail_total += 1
+			var rc: String = str(rm.get("color", "C"))
+			if avail_colors.has(rc): avail_colors[rc] += 1
+	for card in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(card) or not card.is_on_battlefield: continue
+		if get_card_controller_id(card) != pid or card.is_tapped: continue
+		var tl := MagicRules.get_card_type_line(card.card_data).to_lower()
+		var has_haste: bool = card.has_method("has_keyword") and bool(card.has_keyword("haste"))
+		if "creature" in tl and card.has_summoning_sickness and not has_haste: continue
+		var m_abs := OracleParser.parse_mana_abilities(card.card_data, card)
+		if m_abs.is_empty(): continue
+		var best_amt := 0
+		for ab in m_abs:
+			var ab_cost: String = str(ab.get("mana_cost", ""))
+			if not ab_cost.is_empty(): continue
+			if not spell_context.is_empty() and not _does_mana_match_context(str(ab.get("restriction", "")), str(ab.get("chosen_type", "")), spell_context):
+				continue
+			best_amt = maxi(best_amt, maxi(1, int(ab.get("amount", 1))))
+			for col in ab.get("colors", []):
+				var cs := str(col).to_upper()
+				if avail_colors.has(cs): avail_colors[cs] += 1
+			for fc in ab.get("fixed_combo", []):
+				var fcs := str(fc).to_upper()
+				if avail_colors.has(fcs): avail_colors[fcs] += 1
+		avail_total += best_amt
+	var req_total := 0
+	var req_colors := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
+	for res in MANA_COST_REGEX.search_all(mana_cost_str):
+		var sym := res.get_string(1).to_upper()
+		if sym == "X": continue
+		elif sym.is_valid_int(): req_total += sym.to_int()
+		elif "/" in sym: req_total += 1
+		elif req_colors.has(sym):
+			req_total += 1
+			req_colors[sym] += 1
+		else: req_total += 1
+	if avail_total < req_total:
+		return false
+	for rc in req_colors.keys():
+		if int(req_colors[rc]) > 0 and int(avail_colors.get(rc, 0)) < int(req_colors[rc]):
+			return false
+	return true
+
 func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_id, spell_context: Dictionary = {}) -> bool:
 	if mana_cost_str.is_empty() or mana_cost_str == "{}" or mana_cost_str == "0": return true
 
@@ -2119,6 +2476,7 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 	var cards_to_tap: Array[Node3D] = []
 	var tapped_card_colors := {}
 	var generated_mana_to_add := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
+	var tap_pool := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
 	var total_life_cost := 0
 
 	if total_missing > 0:
@@ -2164,33 +2522,45 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 					var amt: int = int(ab.get("amount", 1))
 					if not combo.is_empty():
 						tapped_card_colors[src_card] = combo.duplicate()
-						for fc in combo: generated_mana_to_add[str(fc)] += 1
+						for fc in combo:
+							generated_mana_to_add[str(fc)] += 1
+							tap_pool[str(fc)] += 1
 					else:
 						tapped_card_colors[src_card] = [chosen_color]
 						generated_mana_to_add[chosen_color] += amt
+						tap_pool[chosen_color] += amt
 					return true
 			return false
 
 		for color in missing_colored.keys():
-			while missing_colored[color] > 0:
-				if generated_mana_to_add[color] > colored_required[color] and int(temp_pool[color]) + generated_mana_to_add[color] > colored_required[color]:
+			while int(missing_colored[color]) > 0:
+				if int(tap_pool[color]) > 0:
+					tap_pool[color] -= 1
 					missing_colored[color] -= 1
 				elif consume_source.call([color]):
+					tap_pool[color] -= 1
 					missing_colored[color] -= 1
 				else: return false
+
 		for options in missing_hybrid:
-			if not consume_source.call(options): return false
+			var paid_hyb := false
+			for opt in options:
+				if int(tap_pool[opt]) > 0:
+					tap_pool[opt] -= 1; paid_hyb = true; break
+			if not paid_hyb:
+				if not consume_source.call(options): return false
+				for opt in options:
+					if int(tap_pool[opt]) > 0:
+						tap_pool[opt] -= 1; break
+
 		var any_colors := ["C", "W", "U", "B", "R", "G"]
 		while missing_generic > 0:
-			# Check if excess multi-mana from an already-tapped source (like Sol Ring) covers it
-			var surplus := 0
-			for c in generated_mana_to_add.keys():
-				surplus += maxi(0, generated_mana_to_add[c] - colored_required[c])
-			if surplus >= missing_generic:
-				missing_generic = 0
-				break
-			if consume_source.call(any_colors): missing_generic -= 1
-			else: return false
+			for c in any_colors:
+				while missing_generic > 0 and int(tap_pool[c]) > 0:
+					tap_pool[c] -= 1
+					missing_generic -= 1
+			if missing_generic <= 0: break
+			if not consume_source.call(any_colors): return false
 
 	# Commit payments
 	if payer_id == local_player_id and not used_restricted_indices.is_empty():
@@ -2871,5 +3241,159 @@ func load_game_from_disk(path: String = SAVE_GAME_PATH) -> bool:
 	var json := JSON.new()
 	if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
 		GameSerializer.restore_state(self, json.get_data())
+		if hud_manager and hud_manager.has_method("set_game_setup_complete"):
+			hud_manager.set_game_setup_complete(true)
 		return true
 	return false
+
+var _playable_glow_queued: bool = false
+
+func refresh_playable_card_glows() -> void:
+	if _playable_glow_queued: return
+	_playable_glow_queued = true
+	call_deferred("_do_refresh_playable_card_glows")
+
+func _is_card_face_playable(card_node: Node3D, face_idx: int, is_commander_zone: bool = false) -> bool:
+	var tl := MagicRules.get_card_type_line(card_node.card_data, face_idx).to_lower()
+	if "land" in tl and not is_commander_zone:
+		return turn_manager.can_act_sorcery_speed(local_player_id) and not land_played_this_turn
+	var is_inst: bool = MagicRules.can_cast_at_instant_speed(card_node.card_data, face_idx, local_player_id, self)
+	if not is_inst and not turn_manager.can_act_sorcery_speed(local_player_id):
+		return false
+	var raw_cost: String = get_taxed_mana_cost(card_node) if is_commander_zone else str(MagicRules.get_card_attribute(card_node.card_data, "mana_cost", "", face_idx))
+	var red := ContinuousEffectsEngine.get_cost_reduction(card_node.card_data, local_player_id, battlefield_lands, battlefield_non_lands)
+	var final_cost := ContinuousEffectsEngine.apply_cost_reduction(raw_cost, red)
+	var ctx := {"type_line": tl, "is_commander": is_commander_zone, "is_activated": false, "is_multicolored": card_node.card_data.get("colors", []).size() > 1}
+	if not can_player_potentially_afford(final_cost, local_player_id, ctx):
+		return false
+	if "instant" in tl or "sorcery" in tl or "aura" in tl:
+		var ol := str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_idx)).to_lower()
+		var req_cnt := OracleParser.count_required_targets(ol)
+		if req_cnt > 0:
+			var req_str := OracleParser.extract_target_requirement(ol)
+			if not req_str.is_empty() and MagicRules.count_legal_targets(req_str, local_player_id, self, card_node) < req_cnt:
+				return false
+	return true
+
+func _has_activatable_nonmana_ability(card_node: Node3D) -> bool:
+	if not is_instance_valid(card_node) or not card_node.is_on_battlefield: return false
+	if get_card_controller_id(card_node) != local_player_id: return false
+	var pa: Dictionary = card_node.parsed_abilities if "parsed_abilities" in card_node else {}
+	var is_sorc_ok: bool = turn_manager.can_act_sorcery_speed(local_player_id)
+	if MagicRules.is_planeswalker(card_node.card_data) and is_sorc_ok and "loyalty_activated_this_turn" in card_node and not bool(card_node.loyalty_activated_this_turn):
+		var cur_loy: int = card_node.get_named_counter("loyalty") if card_node.has_method("get_named_counter") else 0
+		for lab in pa.get("loyalty_abilities", []):
+			var d_s := str(lab.get("delta_str", "0"))
+			var delta := 0 if "X" in d_s.to_upper() else d_s.to_int()
+			if cur_loy + delta >= 0: return true
+	for ab in pa.get("activated_abilities", []):
+		var cost_raw := str(ab.get("cost_raw", ""))
+		var eff_raw := str(ab.get("effect_raw", ""))
+		var eff_l := eff_raw.to_lower()
+		if "add " in eff_l: continue
+		if bool(ab.get("sorcery_speed", false)) and not is_sorc_ok: continue
+		if "{T}" in cost_raw.to_upper() and (card_node.is_tapped or (MagicRules.is_creature(card_node.card_data) and card_node.has_summoning_sickness)):
+			continue
+		if "exiled with" in eff_l or "exiled with" in cost_raw.to_lower():
+			var linked: Array = card_node.get_meta("linked_exiled_cards") if card_node.has_meta("linked_exiled_cards") else []
+			if linked.is_empty(): continue
+		var m_cost := ""
+		for m in MANA_COST_REGEX.search_all(cost_raw):
+			var sym := str(m.get_string(1)).to_upper()
+			if sym != "T" and sym != "Q": m_cost += "{" + sym + "}"
+		if not can_player_potentially_afford(m_cost, local_player_id, {"is_activated": true}): continue
+		var req_cnt := OracleParser.count_required_targets(eff_raw)
+		if req_cnt > 0:
+			var req_str := str(ab.get("target_requirement", ""))
+			if not req_str.is_empty() and MagicRules.count_legal_targets(req_str, local_player_id, self, card_node) < req_cnt:
+				continue
+		return true
+	var eq_cost := parse_equip_cost(str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "")))
+	if not eq_cost.is_empty() and is_sorc_ok and can_player_potentially_afford(eq_cost, local_player_id, {"is_activated": true}):
+		for cr in battlefield_non_lands:
+			if is_instance_valid(cr) and cr != card_node and get_card_controller_id(cr) == local_player_id and MagicRules.is_creature(cr.card_data):
+				return true
+	return false
+
+func has_any_playable_card() -> bool:
+	var can_act_now: bool = (not mulligan_phase_active) and turn_manager != null and turn_manager.holds_priority(local_player_id) and (not has_split_second_on_stack())
+	if not can_act_now: return false
+	for c in hand_cards:
+		if not is_instance_valid(c): continue
+		if _is_card_face_playable(c, 0, false): return true
+		if MagicRules.has_multiple_faces(c.card_data) and (MagicRules.is_modal_dfc(c.card_data) or MagicRules.is_split(c.card_data) or MagicRules.is_adventure(c.card_data)):
+			if _is_card_face_playable(c, 1, false): return true
+	for c in command_zone_cards:
+		if is_instance_valid(c) and _is_card_face_playable(c, 0, true): return true
+	for c in battlefield_non_lands + battlefield_lands:
+		if is_instance_valid(c) and _has_activatable_nonmana_ability(c): return true
+	for c in graveyard_stack:
+		if is_instance_valid(c) and "parsed_abilities" in c:
+			var pa: Dictionary = c.parsed_abilities
+			var alt_c := str(pa.get("flashback_cost", "")) if not str(pa.get("flashback_cost", "")).is_empty() else (str(pa.get("escape_cost", "")) if not str(pa.get("escape_cost", "")).is_empty() else str(pa.get("unearth_cost", "")))
+			if not alt_c.is_empty():
+				var is_inst := MagicRules.can_cast_at_instant_speed(c.card_data, 0, local_player_id, self)
+				if (is_inst or turn_manager.can_act_sorcery_speed(local_player_id)) and can_player_potentially_afford(alt_c, local_player_id):
+					return true
+	for c in exile_stack:
+		if not is_instance_valid(c): continue
+		var is_inst := MagicRules.can_cast_at_instant_speed(c.card_data, 0, local_player_id, self)
+		var timing_ok := is_inst or turn_manager.can_act_sorcery_speed(local_player_id)
+		if c.has_meta("foretold_turn") and int(c.get_meta("foretold_turn")) < turn_manager.turn_number and timing_ok:
+			var ft_c := str(c.parsed_abilities.get("foretell_cost", "")) if "parsed_abilities" in c else ""
+			if not ft_c.is_empty() and can_player_potentially_afford(ft_c, local_player_id): return true
+		elif c.has_meta("plotted_turn") and int(c.get_meta("plotted_turn")) < turn_manager.turn_number and turn_manager.can_act_sorcery_speed(local_player_id):
+			return true
+		elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok:
+			if can_player_potentially_afford(str(c.card_data.get("mana_cost", "")), local_player_id): return true
+	return false
+
+func _do_refresh_playable_card_glows() -> void:
+	_playable_glow_queued = false
+	var can_act_now: bool = (not mulligan_phase_active) and turn_manager != null and turn_manager.holds_priority(local_player_id) and (not has_split_second_on_stack())
+	for c in hand_cards:
+		if not is_instance_valid(c) or not c.has_method("set_playable_glow"): continue
+		if not can_act_now:
+			c.set_playable_glow(false); continue
+		var ok := _is_card_face_playable(c, 0, false)
+		if not ok and MagicRules.has_multiple_faces(c.card_data) and (MagicRules.is_modal_dfc(c.card_data) or MagicRules.is_split(c.card_data) or MagicRules.is_adventure(c.card_data)):
+			ok = _is_card_face_playable(c, 1, false)
+		c.set_playable_glow(ok)
+
+	for c in command_zone_cards:
+		if not is_instance_valid(c) or not c.has_method("set_playable_glow"): continue
+		c.set_playable_glow(can_act_now and _is_card_face_playable(c, 0, true))
+
+	for c in battlefield_non_lands + battlefield_lands:
+		if not is_instance_valid(c) or not c.has_method("set_playable_glow"): continue
+		c.set_playable_glow(can_act_now and _has_activatable_nonmana_ability(c))
+
+	for c in graveyard_stack:
+		if not is_instance_valid(c) or not c.has_method("set_playable_glow"): continue
+		var gy_ok := false
+		if can_act_now and "parsed_abilities" in c:
+			var pa: Dictionary = c.parsed_abilities
+			var alt_c := str(pa.get("flashback_cost", "")) if not str(pa.get("flashback_cost", "")).is_empty() else (str(pa.get("escape_cost", "")) if not str(pa.get("escape_cost", "")).is_empty() else str(pa.get("unearth_cost", "")))
+			if not alt_c.is_empty():
+				var is_inst := MagicRules.can_cast_at_instant_speed(c.card_data, 0, local_player_id, self)
+				if (is_inst or turn_manager.can_act_sorcery_speed(local_player_id)) and can_player_potentially_afford(alt_c, local_player_id):
+					gy_ok = true
+		c.set_playable_glow(gy_ok)
+
+	for c in exile_stack:
+		if not is_instance_valid(c) or not c.has_method("set_playable_glow"): continue
+		var ex_ok := false
+		if can_act_now:
+			var is_inst := MagicRules.can_cast_at_instant_speed(c.card_data, 0, local_player_id, self)
+			var timing_ok := is_inst or turn_manager.can_act_sorcery_speed(local_player_id)
+			if c.has_meta("foretold_turn") and int(c.get_meta("foretold_turn")) < turn_manager.turn_number and timing_ok:
+				var ft_c := str(c.parsed_abilities.get("foretell_cost", "")) if "parsed_abilities" in c else ""
+				if not ft_c.is_empty() and can_player_potentially_afford(ft_c, local_player_id): ex_ok = true
+			elif c.has_meta("plotted_turn") and int(c.get_meta("plotted_turn")) < turn_manager.turn_number and turn_manager.can_act_sorcery_speed(local_player_id):
+				ex_ok = true
+			elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok:
+				var ex_c := str(c.card_data.get("mana_cost", ""))
+				if can_player_potentially_afford(ex_c, local_player_id): ex_ok = true
+		c.set_playable_glow(ex_ok)
+	if can_act_now and turn_manager != null and not turn_manager.has_local_player_interaction():
+		turn_manager._schedule_paced_auto_pass()

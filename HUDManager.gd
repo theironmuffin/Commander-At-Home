@@ -10,6 +10,7 @@ var match_log_canvas: CanvasLayer = null
 var settings_canvas: CanvasLayer = null
 var lobby_canvas: CanvasLayer = null
 var touch_bar_canvas: CanvasLayer = null
+var game_setup_complete: bool = false
 var touch_atk_btn: Button = null
 var touch_controls_enabled: bool = false
 var tracker_canvas: CanvasLayer = null
@@ -23,6 +24,7 @@ var phase_ui_label: Label = null
 var priority_ui_label: Label = null
 var phase_step_buttons: Dictionary = {}
 var primary_action_btn: Button = null
+var hold_priority_btn: Button = null
 
 var card_preview_canvas: CanvasLayer = null
 var card_preview_texture_rect: TextureRect = null
@@ -133,11 +135,15 @@ func refresh_player_names() -> void:
 		engine.refresh_command_info_stations()
 	update_phase_ui()
 
+func set_game_setup_complete(ready: bool) -> void:
+	game_setup_complete = ready
+	setup_touch_action_bar()
+
 func setup_touch_action_bar() -> void:
 	if touch_bar_canvas and is_instance_valid(touch_bar_canvas):
 		touch_bar_canvas.queue_free()
 		touch_bar_canvas = null
-	if not touch_controls_enabled: return
+	if not touch_controls_enabled or not game_setup_complete: return
 
 	touch_bar_canvas = CanvasLayer.new()
 	touch_bar_canvas.name = "TouchActionBarHUD"
@@ -539,6 +545,28 @@ func setup_phase_hud() -> void:
 	var action_vbox := VBoxContainer.new()
 	action_vbox.add_theme_constant_override("separation", 8)
 	action_margin.add_child(action_vbox)
+
+	hold_priority_btn = Button.new()
+	hold_priority_btn.text = "⚡ In Response: OFF"
+	hold_priority_btn.custom_minimum_size = Vector2(210, 34)
+	hold_priority_btn.add_theme_font_size_override("font_size", 12)
+	var hold_off_style := StyleBoxFlat.new()
+	hold_off_style.bg_color = Color(0.14, 0.16, 0.22, 0.92); hold_off_style.border_color = Color(0.35, 0.42, 0.55, 0.85); hold_off_style.set_border_width_all(1)
+	hold_off_style.corner_radius_top_left = 8; hold_off_style.corner_radius_top_right = 8; hold_off_style.corner_radius_bottom_left = 8; hold_off_style.corner_radius_bottom_right = 8
+	var hold_on_style := hold_off_style.duplicate()
+	hold_on_style.bg_color = Color(0.42, 0.28, 0.08, 0.96); hold_on_style.border_color = Color(1.0, 0.78, 0.22, 1.0); hold_on_style.set_border_width_all(2)
+	hold_priority_btn.add_theme_stylebox_override("normal", hold_off_style)
+	hold_priority_btn.add_theme_stylebox_override("hover", hold_off_style)
+	hold_priority_btn.pressed.connect(func():
+		var tm: TurnManager = engine.turn_manager
+		tm.hold_priority_in_response = not tm.hold_priority_in_response
+		hold_priority_btn.text = "⚡ In Response: ON" if tm.hold_priority_in_response else "⚡ In Response: OFF"
+		hold_priority_btn.add_theme_stylebox_override("normal", hold_on_style if tm.hold_priority_in_response else hold_off_style)
+		hold_priority_btn.add_theme_stylebox_override("hover", hold_on_style if tm.hold_priority_in_response else hold_off_style)
+		if not tm.hold_priority_in_response and tm.priority_player_id == engine.local_player_id and not tm.has_local_player_interaction():
+			tm._schedule_paced_auto_pass()
+	)
+	action_vbox.add_child(hold_priority_btn)
 
 	primary_action_btn = Button.new()
 	primary_action_btn.text = "Next [Space]"
@@ -1364,6 +1392,13 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 			var needs_tap := "{T}" in cost_raw or "{t}" in cost_raw
 			if needs_tap and card_node.is_tapped:
 				popup.queue_free(); return
+			var req_cnt := OracleParser.count_required_targets(effect_raw)
+			if req_cnt > 0 and not target_req.is_empty():
+				var avail_cnt := MagicRules.count_legal_targets(target_req, engine.local_player_id, engine, card_node)
+				if avail_cnt < req_cnt:
+					popup.queue_free()
+					show_toast("Not enough legal targets (%d needed, %d available)" % [req_cnt, avail_cnt])
+					return
 
 			var mana_cost := ""
 			for m in engine.MANA_COST_REGEX.search_all(cost_raw):
@@ -2122,7 +2157,11 @@ func open_modal_choice_popup(card_name: String, choose_count: int, allow_repeat:
 	vbox.add_child(title)
 
 	var selected_modes: Array[String] = []
-	var confirm_btn: Button = null
+	var confirm_btn: Button = Button.new() if choose_count > 1 else null
+	if confirm_btn:
+		confirm_btn.text = "Confirm (0/%d)" % choose_count
+		confirm_btn.disabled = true
+		confirm_btn.custom_minimum_size = Vector2(150, 36)
 	var mode_buttons: Array[Button] = []
 
 	for i in range(modes.size()):
@@ -2162,11 +2201,7 @@ func open_modal_choice_popup(card_name: String, choose_count: int, allow_repeat:
 	cancel_btn.pressed.connect(func(): popup.queue_free())
 	action_row.add_child(cancel_btn)
 
-	if choose_count > 1:
-		confirm_btn = Button.new()
-		confirm_btn.text = "Confirm (0/%d)" % choose_count
-		confirm_btn.disabled = true
-		confirm_btn.custom_minimum_size = Vector2(150, 36)
+	if confirm_btn:
 		confirm_btn.pressed.connect(func():
 			var joined := "\n".join(selected_modes)
 			popup.queue_free()
@@ -2397,6 +2432,101 @@ func toggle_settings_menu() -> void:
 			sfx_btn.text = "Sound Effects: OFF" if next_m else "Sound Effects: ON"
 	)
 	grid.add_child(sfx_btn)
+
+	var surface_btn := Button.new()
+	var _sf_label := func() -> String:
+		var t_id: String = str(engine.current_playmat_theme) if "current_playmat_theme" in engine else "classic_felt"
+		return "Surface: " + t_id.replace("_", " ").capitalize()
+	surface_btn.text = _sf_label.call()
+	surface_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	surface_btn.custom_minimum_size = Vector2(0, 38)
+	surface_btn.pressed.connect(func():
+		var themes := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment"]
+		var cur_idx: int = themes.find(str(engine.current_playmat_theme))
+		var next_t: String = themes[(cur_idx + 1) % themes.size()]
+		engine.apply_playmat_theme(next_t)
+		surface_btn.text = _sf_label.call()
+	)
+	grid.add_child(surface_btn)
+
+	var my_slv_btn := Button.new()
+	my_slv_btn.text = "🃏 My Sleeves..."
+	my_slv_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	my_slv_btn.custom_minimum_size = Vector2(0, 38)
+	my_slv_btn.pressed.connect(func():
+		var fd := FileDialog.new()
+		fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+		fd.access = FileDialog.ACCESS_FILESYSTEM
+		fd.use_native_dialog = true
+		fd.title = "Select Your Custom Sleeve Image"
+		fd.add_filter("*.png, *.jpg, *.jpeg, *.webp", "Image Files")
+		settings_canvas.add_child(fd)
+		fd.file_selected.connect(func(path: String):
+			if engine.has_method("set_player_sleeve"):
+				engine.set_player_sleeve(engine.local_player_id, path)
+			for c in engine.library_stack + engine.hand_cards + engine.graveyard_stack + engine.exile_stack + engine.command_zone_cards + engine.battlefield_lands + engine.battlefield_non_lands:
+				if is_instance_valid(c) and engine.get_card_owner_id(c) == engine.local_player_id and c.has_method("_apply_back_texture"):
+					c._apply_back_texture()
+			fd.queue_free()
+		)
+		fd.canceled.connect(func(): fd.queue_free())
+		fd.popup_centered(Vector2i(700, 500))
+	)
+	grid.add_child(my_slv_btn)
+
+	var my_pm_btn := Button.new()
+	my_pm_btn.text = "🖼 My Playmat..."
+	my_pm_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	my_pm_btn.custom_minimum_size = Vector2(0, 38)
+	my_pm_btn.pressed.connect(func():
+		var fd := FileDialog.new()
+		fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+		fd.access = FileDialog.ACCESS_FILESYSTEM
+		fd.use_native_dialog = true
+		fd.title = "Select Your Custom Playmat"
+		fd.add_filter("*.png, *.jpg, *.jpeg, *.webp", "Image Files")
+		settings_canvas.add_child(fd)
+		fd.file_selected.connect(func(path: String):
+			if engine.has_method("set_player_playmat"):
+				engine.set_player_playmat(engine.local_player_id, path)
+			fd.queue_free()
+		)
+		fd.canceled.connect(func(): fd.queue_free())
+		fd.popup_centered(Vector2i(700, 500))
+	)
+	grid.add_child(my_pm_btn)
+
+	var vol_box := HBoxContainer.new()
+	vol_box.add_theme_constant_override("separation", 8)
+	var vol_lbl := Label.new()
+	vol_lbl.text = "Master Vol"
+	vol_lbl.custom_minimum_size = Vector2(82, 0)
+	vol_box.add_child(vol_lbl)
+	var vol_slider := HSlider.new()
+	vol_slider.min_value = 0.0; vol_slider.max_value = 1.0; vol_slider.step = 0.05
+	vol_slider.value = float(engine.sound_manager.master_volume) if engine.sound_manager else 0.85
+	vol_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vol_slider.value_changed.connect(func(v: float):
+		if engine.sound_manager: engine.sound_manager.set_master_volume(v)
+	)
+	vol_box.add_child(vol_slider)
+	grid.add_child(vol_box)
+
+	var sfx_vol_box := HBoxContainer.new()
+	sfx_vol_box.add_theme_constant_override("separation", 8)
+	var sfx_vol_lbl := Label.new()
+	sfx_vol_lbl.text = "SFX Vol"
+	sfx_vol_lbl.custom_minimum_size = Vector2(82, 0)
+	sfx_vol_box.add_child(sfx_vol_lbl)
+	var sfx_vol_slider := HSlider.new()
+	sfx_vol_slider.min_value = 0.0; sfx_vol_slider.max_value = 1.0; sfx_vol_slider.step = 0.05
+	sfx_vol_slider.value = float(engine.sound_manager.sfx_volume) if engine.sound_manager else 0.85
+	sfx_vol_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sfx_vol_slider.value_changed.connect(func(v: float):
+		if engine.sound_manager: engine.sound_manager.set_sfx_volume(v)
+	)
+	sfx_vol_box.add_child(sfx_vol_slider)
+	grid.add_child(sfx_vol_box)
 
 	var auto_btn := Button.new()
 	auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
@@ -2999,3 +3129,120 @@ func open_trigger_order_popup(trigs: Array, callback: Callable) -> void:
 	)
 	vbox.add_child(auto_b)
 	apply_custom_font(popup)
+
+func show_toast(msg: String, col: Color = Color(1.0, 0.55, 0.35, 1.0)) -> void:
+	if not engine: return
+	var tc := CanvasLayer.new()
+	tc.layer = 65
+	engine.add_child(tc)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	center.offset_top = 86
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tc.add_child(center)
+	var pan := PanelContainer.new()
+	pan.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.12, 0.08, 0.08, 0.94); st.border_color = col; st.set_border_width_all(2)
+	st.corner_radius_top_left = 10; st.corner_radius_top_right = 10; st.corner_radius_bottom_left = 10; st.corner_radius_bottom_right = 10
+	st.content_margin_left = 18; st.content_margin_right = 18; st.content_margin_top = 8; st.content_margin_bottom = 8
+	pan.add_theme_stylebox_override("panel", st)
+	center.add_child(pan)
+	var lbl := Label.new()
+	lbl.text = msg
+	lbl.add_theme_font_size_override("font_size", 15)
+	lbl.add_theme_color_override("font_color", Color(1.0, 0.92, 0.85, 1.0))
+	pan.add_child(lbl)
+	apply_custom_font(tc)
+	var tw := engine.create_tween()
+	tw.tween_interval(1.6)
+	tw.tween_property(pan, "modulate:a", 0.0, 0.4)
+	tw.tween_callback(func():
+		if is_instance_valid(tc): tc.queue_free()
+	)
+
+func open_look_and_pick_popup(top_cards: Array, pick_count: int = 1, dest_zone: String = "hand", rest_zone: String = "bottom") -> void:
+	if top_cards.is_empty() or not engine: return
+	var lc := CanvasLayer.new()
+	lc.name = "LookAndPickUI"
+	lc.layer = 55
+	engine.add_child(lc)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.78)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lc.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lc.add_child(center)
+
+	var panel := PanelContainer.new()
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	panel.custom_minimum_size = Vector2(minf(780.0, vp_sz.x - 32.0), minf(420.0, vp_sz.y - 40.0))
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 14)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "LOOK AT TOP %d — CHOOSE %d TO PUT INTO %s" % [top_cards.size(), pick_count, dest_zone.to_upper()]
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
+	vbox.add_child(title)
+
+	var hbox := HBoxContainer.new()
+	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	hbox.add_theme_constant_override("separation", 14)
+	vbox.add_child(hbox)
+
+	var chosen: Array = []
+	var finalize_pick := func():
+		if is_instance_valid(lc): lc.queue_free()
+		for c_node in top_cards:
+			if not is_instance_valid(c_node): continue
+			if c_node in chosen:
+				var gt: Transform3D = c_node.global_transform
+				c_node.reparent(engine.hand_container, true)
+				c_node.global_transform = gt
+				engine.hand_cards.append(c_node)
+				engine.zone_manager.update_hand_positions(true)
+			else:
+				if rest_zone == "graveyard":
+					engine.zone_manager.move_to_graveyard(c_node)
+				else:
+					engine.zone_manager.move_to_bottom_library(c_node)
+		engine.zone_manager.update_zone_counters()
+		engine.refresh_playable_card_glows()
+
+	for c_node in top_cards:
+		var c_vbox := VBoxContainer.new()
+		c_vbox.add_theme_constant_override("separation", 8)
+		hbox.add_child(c_vbox)
+
+		var tex_rect := TextureRect.new()
+		tex_rect.custom_minimum_size = Vector2(165, 230)
+		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		var img_url: String = str(MagicRules.get_card_attribute(c_node.card_data, "image_url", ""))
+		if not img_url.is_empty():
+			var cached_t = CardManager.get_cached_texture(img_url)
+			if cached_t: tex_rect.texture = cached_t
+		c_vbox.add_child(tex_rect)
+
+		var pick_btn := Button.new()
+		pick_btn.text = "Put in Hand"
+		pick_btn.custom_minimum_size = Vector2(165, 38)
+		pick_btn.pressed.connect(func():
+			if c_node in chosen: return
+			chosen.append(c_node)
+			pick_btn.disabled = true
+			pick_btn.text = "Selected"
+			if chosen.size() >= pick_count:
+				finalize_pick.call()
+		)
+		c_vbox.add_child(pick_btn)
+
+	apply_custom_font(lc)

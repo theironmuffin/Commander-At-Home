@@ -357,16 +357,52 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 	return parsed_data
 
 static func extract_target_requirement(text: String) -> String:
-	var lower := text.to_lower()
+	_ensure_regex_initialized()
+	var clean := REMINDER_REGEX.sub(text, "", true)
+	var lower := clean.to_lower()
 	var idx := lower.find("target ")
 	if idx == -1:
 		return ""
 	var sub := lower.substr(idx + 7).strip_edges()
-	for stop_word in [".", ",", " until ", " gets ", " gains ", " deals ", " and ", " to "]:
+	for stop_word in [".", ",", " until ", " gets ", " gains ", " deals ", " and ", " to ", " with "]:
 		var s_idx := sub.find(stop_word)
 		if s_idx != -1:
 			sub = sub.substr(0, s_idx).strip_edges()
 	return sub
+
+static func count_required_targets(text: String) -> int:
+	_ensure_regex_initialized()
+	var clean := REMINDER_REGEX.sub(text, "", true).to_lower()
+	if not ("target " in clean):
+		return 0
+	if "up to " in clean or "any number of target" in clean:
+		var idx_up := clean.find("up to ")
+		var idx_tg := clean.find("target ")
+		if (idx_up != -1 and idx_up < idx_tg and idx_tg - idx_up < 24) or "any number of target" in clean:
+			return 0
+	var max_cnt := 1
+	if "two target" in clean: max_cnt = maxi(max_cnt, 2)
+	elif "three target" in clean: max_cnt = maxi(max_cnt, 3)
+	elif "four target" in clean: max_cnt = maxi(max_cnt, 4)
+	elif "five target" in clean: max_cnt = maxi(max_cnt, 5)
+	var occ := 0
+	var pos := 0
+	while true:
+		pos = clean.find("target ", pos)
+		if pos == -1: break
+		occ += 1
+		pos += 7
+	return maxi(max_cnt, occ)
+
+static func extract_target_zone(requirement: String) -> String:
+	var r := requirement.to_lower()
+	if "graveyard" in r:
+		return "graveyard"
+	if "exile" in r:
+		return "exile"
+	if "spell" in r or "activated ability" in r or "triggered ability" in r:
+		return "stack"
+	return "battlefield"
 
 static func _extract_keywords(line: String) -> Array[String]:
 	var found: Array[String] = []
@@ -554,6 +590,10 @@ static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) 
 		var fixed_combo: Array[String] = []
 		var amount := 1
 
+		if "two mana" in eff_lower: amount = 2
+		elif "three mana" in eff_lower: amount = 3
+		elif "four mana" in eff_lower: amount = 4
+		elif "five mana" in eff_lower: amount = 5
 		if "of the chosen color" in eff_lower and not chosen_color.is_empty():
 			colors = [chosen_color] as Array[String]
 		elif "any color" in eff_lower or "any one color" in eff_lower or "mana of any" in eff_lower:
@@ -566,6 +606,9 @@ static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) 
 					syms.append(sym)
 			var add_clause_lower := eff_lower.split(".")[0]
 			if " or " in add_clause_lower:
+				var first_opt := eff_part.split(".")[0].split(",")[0].split(" or ")[0].to_upper()
+				var opt_cnt := sym_rx.search_all(first_opt).size()
+				if opt_cnt > 1: amount = opt_cnt
 				for s in syms:
 					if not (s in colors): colors.append(s)
 			elif syms.size() == 1:

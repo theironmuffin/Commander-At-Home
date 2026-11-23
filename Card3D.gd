@@ -23,6 +23,7 @@ var is_tapped: bool = false
 var is_token: bool = false
 var in_library: bool = false
 var is_highlighted: bool = false
+var is_playable_glow: bool = false
 
 var front_face_rest_pos: Vector3
 var stored_front_texture: Texture2D = null
@@ -74,6 +75,7 @@ var temp_toughness_modifier: int = 0
 var counter_label: Label3D
 var token_label: Label3D
 var pt_badge_label: Label3D
+var loyalty_badge_label: Label3D
 var combat_badge_label: Label3D
 var status_badge_label: Label3D
 var shader_mat: ShaderMaterial
@@ -148,6 +150,20 @@ func _setup_pt_badge() -> void:
 	if BELEREN_FONT:
 		pt_badge_label.font = BELEREN_FONT
 	front_face.add_child(pt_badge_label)
+
+	loyalty_badge_label = Label3D.new()
+	loyalty_badge_label.name = "LoyaltyBadge"
+	loyalty_badge_label.position = Vector3(0.22, 0.055, 0.35)
+	loyalty_badge_label.rotation_degrees = Vector3(-90, 0, 0)
+	loyalty_badge_label.font_size = 36
+	loyalty_badge_label.outline_size = 18
+	loyalty_badge_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	loyalty_badge_label.pixel_size = 0.0025
+	loyalty_badge_label.modulate = Color(0.95, 0.82, 0.35, 1)
+	loyalty_badge_label.visible = false
+	if BELEREN_FONT:
+		loyalty_badge_label.font = BELEREN_FONT
+	front_face.add_child(loyalty_badge_label)
 
 func _setup_combat_badge() -> void:
 	combat_badge_label = Label3D.new()
@@ -338,7 +354,15 @@ func set_highlight(active: bool) -> void:
 	if shader_mat:
 		shader_mat.set_shader_parameter("outline_active", active)
 
+func set_playable_glow(active: bool) -> void:
+	if is_playable_glow == active: return
+	is_playable_glow = active
+	if shader_mat:
+		shader_mat.set_shader_parameter("playable_sheen", active)
+
 func toggle_tap() -> void:
+	if get_tree() and get_tree().current_scene and get_tree().current_scene.has_method("refresh_playable_card_glows"):
+		get_tree().current_scene.call_deferred("refresh_playable_card_glows")
 	is_tapped = not is_tapped
 	var eb := get_node_or_null("/root/EventBus")
 	if eb and eb.has_method("play_sfx"):
@@ -538,8 +562,18 @@ func _refresh_counter_label() -> void:
 	if counter_amount != 0:
 		lines.append("%+d/%+d" % [counter_amount, counter_amount])
 	for k in custom_counters.keys():
+		if str(k) == "loyalty": continue
 		lines.append("%s: %d" % [str(k).capitalize(), int(custom_counters[k])])
 	counter_label.text = "\n".join(lines)
+	if loyalty_badge_label and is_instance_valid(loyalty_badge_label):
+		var loy_val: int = int(custom_counters.get("loyalty", 0))
+		if custom_counters.has("loyalty") or (not card_data.is_empty() and MagicRules.is_planeswalker(card_data) and is_on_battlefield):
+			loyalty_badge_label.text = "🛡 %d" % loy_val
+			loyalty_badge_label.visible = true
+			var pt_vis: bool = pt_badge_label != null and pt_badge_label.visible
+			loyalty_badge_label.position = Vector3(0.22, 0.055, 0.22) if pt_vis else Vector3(0.22, 0.055, 0.35)
+		else:
+			loyalty_badge_label.visible = false
 	if counter_amount > 0:
 		counter_label.modulate = Color(0.4, 0.9, 0.4, 1)
 	elif counter_amount < 0:

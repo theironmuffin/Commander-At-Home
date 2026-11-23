@@ -4,6 +4,7 @@ render_mode cull_disabled, depth_draw_opaque;
 uniform sampler2D front_tex : source_color, filter_linear_mipmap;
 uniform sampler2D back_tex : source_color, filter_linear_mipmap;
 uniform bool outline_active = false;
+uniform bool playable_sheen = false;
 uniform float foil_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float corner_radius : hint_range(0.0, 0.25) = 0.045;
 
@@ -41,6 +42,21 @@ void fragment() {
 	} else {
 		ROUGHNESS = 0.45;
 		METALLIC = 0.0;
+	}
+
+	if (playable_sheen && FRONT_FACING) {
+		float pulse = 0.72 + 0.28 * sin(TIME * 3.4);
+		vec3 gold = vec3(1.0, 0.82, 0.22);
+		float sweep = fract(TIME * 0.42);
+		float diag = (UV.x * 0.65 + UV.y * 0.35);
+		float glint = exp(-pow((diag - sweep) * 7.5, 2.0)) * 0.28;
+		if (dist > -0.022) {
+			final_col = mix(final_col, gold, 0.72 * pulse);
+			emit_col += gold * (0.75 * pulse);
+		} else if (glint > 0.01) {
+			final_col = mix(final_col, gold, glint * 0.55);
+			emit_col += gold * glint;
+		}
 	}
 
 	if (outline_active && dist > -0.022) {

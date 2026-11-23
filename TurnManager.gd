@@ -50,6 +50,7 @@ var turn_number: int = 1
 
 var phase_stops: Dictionary = {}
 var pass_until_end_step: bool = false
+var hold_priority_in_response: bool = false
 var _auto_pass_timer_active: bool = false
 
 func setup(main_engine: Node) -> void:
@@ -76,20 +77,21 @@ func set_starting_player(pid: int) -> void:
 
 
 func has_local_player_interaction() -> bool:
-	if bool(phase_stops.get(current_turn_phase, false)):
+	if hold_priority_in_response:
 		return true
-	if not engine.active_stack.is_empty():
+	if bool(phase_stops.get(current_turn_phase, false)):
 		return true
 	if current_turn_phase == TurnPhase.COMBAT_DECLARE_BLOCKERS and engine.combat_manager.has_attackers_declared():
 		for c in engine.battlefield_non_lands:
 			if is_instance_valid(c) and bool(c.get("is_attacking")) and int(c.get("attacking_target_player_id")) == engine.local_player_id:
-				return true
-	if active_player_id == engine.local_player_id:
-		if current_turn_phase in [TurnPhase.PRECOMBAT_MAIN, TurnPhase.POSTCOMBAT_MAIN, TurnPhase.COMBAT_DECLARE_ATTACKERS]:
+				for blk in engine.battlefield_non_lands:
+					if is_instance_valid(blk) and engine.get_card_controller_id(blk) == engine.local_player_id and MagicRules.is_creature(blk.card_data) and not blk.is_tapped:
+						return true
+	if active_player_id == engine.local_player_id and current_turn_phase == TurnPhase.COMBAT_DECLARE_ATTACKERS and not pass_until_end_step:
+		if _has_eligible_attackers(engine.local_player_id):
 			return true
-	for c in engine.hand_cards:
-		if is_instance_valid(c) and MagicRules.is_instant_speed(c.card_data):
-			return true
+	if engine.has_method("has_any_playable_card") and engine.has_any_playable_card():
+		return true
 	return false
 
 func _schedule_paced_auto_pass() -> void:
@@ -100,7 +102,7 @@ func _schedule_paced_auto_pass() -> void:
 	if tree == null:
 		_auto_pass_timer_active = false
 		return
-	tree.create_timer(0.25).timeout.connect(func():
+	tree.create_timer(0.48).timeout.connect(func():
 		_auto_pass_timer_active = false
 		if not is_instance_valid(engine): return
 		if engine.mulligan_phase_active: return
@@ -156,9 +158,8 @@ func pass_priority(from_network: bool = false) -> void:
 			engine.resolve_top_stack_card()
 			if engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id):
 				engine.ai_controller.schedule_ai_action(priority_player_id)
-			elif auto_pass_opponents and not engine.is_human_seat(priority_player_id):
-				pass_priority()
-				return
+			elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
+				_schedule_paced_auto_pass()
 		else:
 			advance_turn_phase(false)
 	else:
@@ -216,7 +217,7 @@ func _should_auto_skip_current_phase() -> bool:
 		TurnPhase.DRAW_STEP:
 			return not _has_upkeep_or_draw_trigger(TurnPhase.DRAW_STEP)
 		TurnPhase.COMBAT_BEGIN:
-			return not _has_eligible_attackers(active_player_id) and not bool(phase_stops.get(TurnPhase.COMBAT_DECLARE_ATTACKERS, false))
+			return (not _has_beginning_of_combat_trigger()) and (not _has_eligible_attackers(active_player_id)) and (not bool(phase_stops.get(TurnPhase.COMBAT_DECLARE_ATTACKERS, false)))
 		TurnPhase.COMBAT_DECLARE_ATTACKERS:
 			return not _has_eligible_attackers(active_player_id)
 		TurnPhase.COMBAT_DECLARE_BLOCKERS, TurnPhase.COMBAT_DAMAGE, TurnPhase.COMBAT_END:
@@ -355,4 +356,16 @@ func _has_eligible_attackers(pid: int) -> bool:
 		var has_haste: bool = card.has_method("has_keyword") and bool(card.has_keyword("haste"))
 		if not card.has_summoning_sickness or has_haste:
 			return true
+	return false
+
+func _has_beginning_of_combat_trigger() -> bool:
+	for perm in engine.battlefield_lands + engine.battlefield_non_lands:
+		if not is_instance_valid(perm) or not perm.has_method("get_triggered_abilities"): continue
+		var perm_owner: int = engine.get_card_owner_id(perm)
+		for trig in perm.get_triggered_abilities():
+			var ev := str(trig.get("trigger_event_raw", "")).to_lower()
+			if "beginning of combat" in ev:
+				if ("on your turn" in ev or "your combat" in ev) and perm_owner != active_player_id:
+					continue
+				return true
 	return false

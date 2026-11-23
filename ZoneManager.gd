@@ -528,14 +528,20 @@ func move_to_battlefield_from_zone(card_node: Node3D, controller_id: int, enter_
 	engine.run_state_based_actions()
 
 func attach_card_to_creature(attachment: Node3D, target_creature: Node3D, pay_equip_cost: bool = false) -> void:
-	if not attachment or not target_creature: return
+	if not attachment or not target_creature or attachment == target_creature: return
 
 	var type_line := MagicRules.get_card_type_line(attachment.card_data).to_lower()
 	if pay_equip_cost and "equipment" in type_line and attachment.is_on_battlefield:
 		var equip_cost: String = engine.parse_equip_cost(attachment.card_data.get("oracle_text", ""))
 		if not equip_cost.is_empty() and not engine.can_pay_and_drain_cost(equip_cost): return
 
-	if attachment.get("attached_to") != null: detach_card(attachment)
+	if attachment.get("attached_to") != null:
+		detach_card(attachment, true)
+
+	if attachment.has_meta("_attach_tween"):
+		var old_tw: Variant = attachment.get_meta("_attach_tween")
+		if old_tw is Tween and (old_tw as Tween).is_valid():
+			(old_tw as Tween).kill()
 
 	engine.battlefield_non_lands.erase(attachment); engine.active_stack.erase(attachment)
 	if attachment in engine.hand_cards: engine.hand_cards.erase(attachment); update_hand_positions(true)
@@ -544,6 +550,7 @@ func attach_card_to_creature(attachment: Node3D, target_creature: Node3D, pay_eq
 	if not attachment in target_creature.attachments: target_creature.attachments.append(attachment)
 
 	attachment.is_on_battlefield = true; attachment.is_tapped = false
+	attachment.visible = true
 	if attachment.collision_shape: attachment.collision_shape.disabled = false
 
 	attachment.reparent(target_creature, true)
@@ -551,6 +558,7 @@ func attach_card_to_creature(attachment: Node3D, target_creature: Node3D, pay_eq
 	var target_local_pos := Vector3(-0.11 - (attach_idx * 0.05), -0.003 * (attach_idx + 1), -0.14 - (attach_idx * 0.05))
 
 	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	attachment.set_meta("_attach_tween", tween)
 	tween.tween_property(attachment, "position", target_local_pos, 0.3)
 	tween.tween_property(attachment, "quaternion", Quaternion.IDENTITY, 0.3)
 
@@ -558,17 +566,17 @@ func attach_card_to_creature(attachment: Node3D, target_creature: Node3D, pay_eq
 	update_battlefield_positions(true)
 	engine.run_state_based_actions()
 
-func detach_card(attachment: Node3D) -> void:
+func detach_card(attachment: Node3D, skip_layout: bool = false) -> void:
 	if not attachment: return
 	var host_creature: Node3D = attachment.get("attached_to")
-	if host_creature and "attachments" in host_creature:
+	if host_creature and is_instance_valid(host_creature) and "attachments" in host_creature:
 		host_creature.attachments.erase(attachment)
 	attachment.attached_to = null
 
 	var type_line := MagicRules.get_card_type_line(attachment.card_data).to_lower()
-	if "aura" in type_line:
+	if "aura" in type_line and not skip_layout:
 		move_to_graveyard(attachment)
-	else:
+	elif not skip_layout:
 		var global_trans := attachment.global_transform
 		attachment.reparent(engine, true)
 		attachment.global_transform = global_trans
