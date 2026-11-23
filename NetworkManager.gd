@@ -48,14 +48,22 @@ func is_seat_human(seat_id: int) -> bool:
 	return seat_to_peer.has(seat_id)
 
 func get_local_lan_ip() -> String:
+	var candidates: Array[String] = []
 	for ip in IP.get_local_addresses():
 		if "." in ip and not ip.begins_with("127.") and not ip.begins_with("169.254."):
-			return ip
-	return "127.0.0.1"
+			candidates.append(ip)
+	for c in candidates:
+		if c.begins_with("192.168."):
+			return c
+	for c in candidates:
+		if c.begins_with("10."):
+			return c
+	return candidates[0] if not candidates.is_empty() else "127.0.0.1"
 
 func host_game(port: int = DEFAULT_PORT) -> Error:
 	disconnect_game()
 	enet_peer = ENetMultiplayerPeer.new()
+	enet_peer.set_bind_ip("0.0.0.0")
 	var err := enet_peer.create_server(port, MAX_SEATS - 1)
 	if err != OK:
 		enet_peer = null
@@ -75,18 +83,26 @@ func host_game(port: int = DEFAULT_PORT) -> Error:
 func join_game(ip: String, port: int = DEFAULT_PORT) -> Error:
 	disconnect_game()
 	var clean_ip := ip.strip_edges()
+	var target_port := clampi(port, 1, 65535)
+	if ":" in clean_ip and not clean_ip.begins_with("["):
+		var parts := clean_ip.split(":")
+		clean_ip = parts[0].strip_edges()
+		if parts.size() > 1 and parts[1].strip_edges().is_valid_int():
+			target_port = clampi(parts[1].strip_edges().to_int(), 1, 65535)
 	if clean_ip.is_empty():
 		clean_ip = "127.0.0.1"
 	enet_peer = ENetMultiplayerPeer.new()
-	var err := enet_peer.create_client(clean_ip, port)
+	var err := enet_peer.create_client(clean_ip, target_port)
 	if err != OK:
 		enet_peer = null
-		connection_status_changed.emit("Join failed (Error %d)" % err, false)
+		var hint := " (check IP, Android INTERNET perm, or Firewall UDP %d)" % target_port if err == ERR_CANT_CREATE else ""
+		connection_status_changed.emit("Join failed (Error %d)%s" % [err, hint], false)
 		return err
+	port = target_port
 	get_tree().get_multiplayer().multiplayer_peer = enet_peer
 	is_hosting = false
 	is_in_lobby = true
-	connection_status_changed.emit("Connecting to %s:%d..." % [clean_ip, port], false)
+	connection_status_changed.emit("Connecting to %s:%d..." % [clean_ip, target_port], false)
 	return OK
 
 func disconnect_game() -> void:

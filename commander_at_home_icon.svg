@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Outer Background & Rounded App Badge -->
+  <rect width="512" height="512" fill="#121620"/>
+  <rect x="36" y="36" width="440" height="440" rx="88" ry="88" fill="#1D2330"/>
+
+  <!-- Three-Pointed Commander Crown Behind Roof -->
+  <path d="M 186 206 L 154 110 L 218 156 L 256 96 L 294 156 L 358 110 L 326 206"
+        fill="none" stroke="#D9B45A" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- House Silhouette Outline -->
+  <path d="M 256 156 L 106 276 L 146 276 L 146 408 L 366 408 L 366 276 L 406 276 Z"
+        fill="#1D2330" stroke="#D9B45A" stroke-width="18" stroke-linejoin="round"/>
+
+  <!-- Centered Playing Card Outline (Warm Ivory) -->
+  <rect x="206" y="246" width="100" height="134" rx="14" ry="14"
+        fill="#121620" stroke="#F2EAD3" stroke-width="14"/>
+
+  <!-- Card Corner Accents & Center Mana Diamond (Antique Gold) -->
+  <polygon points="222,262 242,262 222,292" fill="#D9B45A"/>
+  <polygon points="290,262 270,262 290,292" fill="#D9B45A"/>
+  <polygon points="222,364 242,364 222,334" fill="#D9B45A"/>
+  <polygon points="290,364 270,364 290,334" fill="#D9B45A"/>
+  <polygon points="256,286 278,313 256,340 234,313" fill="#D9B45A"/>
+</svg>
