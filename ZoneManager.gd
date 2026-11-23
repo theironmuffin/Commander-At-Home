@@ -241,6 +241,12 @@ func _arrange_cards_in_row(cards: Array[Node3D], spacing: float, y_pos: float, z
 func remove_from_battlefield(card_node: Node3D) -> void:
 	engine.battlefield_lands.erase(card_node)
 	engine.battlefield_non_lands.erase(card_node)
+	if card_node and is_instance_valid(card_node) and card_node.has_meta("ltb_return_cards"):
+		var ltb_arr: Array = card_node.get_meta("ltb_return_cards")
+		card_node.remove_meta("ltb_return_cards")
+		for ret_c in ltb_arr:
+			if is_instance_valid(ret_c):
+				move_to_battlefield_from_zone(ret_c, engine.get_card_owner_id(ret_c), false)
 	if "attachments" in card_node and not card_node.attachments.is_empty():
 		for att in card_node.attachments.duplicate():
 			if is_instance_valid(att):

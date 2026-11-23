@@ -374,6 +374,104 @@ const PLAYER_PLAYMATS_SAVE_PATH := "user://player_playmats.json"
 var player_playmats: Dictionary = {}
 var player_playmat_meshes: Dictionary = {}
 var _default_player_playmat_tex: Texture2D = null
+var _playmat_base_mesh: ArrayMesh = null
+var _playmat_top_shader: Shader = null
+
+func _get_rounded_playmat_base_mesh() -> ArrayMesh:
+	if _playmat_base_mesh != null:
+		return _playmat_base_mesh
+	var hw := 3.1
+	var hd := 1.275
+	var r := 0.22
+	var hy := 0.009
+	var segs := 8
+	var pts: Array[Vector2] = []
+	var corners := [
+		[Vector2(hw - r, -hd + r), -PI * 0.5, 0.0],
+		[Vector2(hw - r, hd - r), 0.0, PI * 0.5],
+		[Vector2(-hw + r, hd - r), PI * 0.5, PI],
+		[Vector2(-hw + r, -hd + r), PI, PI * 1.5]
+	]
+	for c_info in corners:
+		var cen: Vector2 = c_info[0]
+		var a0: float = float(c_info[1])
+		var a1: float = float(c_info[2])
+		for s in range(segs + 1):
+			var ang := lerpf(a0, a1, float(s) / float(segs))
+			pts.append(cen + Vector2(cos(ang) * r, sin(ang) * r))
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var n := pts.size()
+	for i in range(n):
+		var p0: Vector2 = pts[i]
+		var p1: Vector2 = pts[(i + 1) % n]
+		# Top cap triangle
+		st.set_normal(Vector3.UP)
+		st.add_vertex(Vector3(0.0, hy, 0.0))
+		st.set_normal(Vector3.UP)
+		st.add_vertex(Vector3(p0.x, hy, p0.y))
+		st.set_normal(Vector3.UP)
+		st.add_vertex(Vector3(p1.x, hy, p1.y))
+		# Side quad
+		var d := (p1 - p0).normalized()
+		var sn := Vector3(d.y, 0.0, -d.x)
+		var t0 := Vector3(p0.x, hy, p0.y)
+		var t1 := Vector3(p1.x, hy, p1.y)
+		var b0 := Vector3(p0.x, -hy, p0.y)
+		var b1 := Vector3(p1.x, -hy, p1.y)
+		st.set_normal(sn); st.add_vertex(t0)
+		st.set_normal(sn); st.add_vertex(b0)
+		st.set_normal(sn); st.add_vertex(t1)
+		st.set_normal(sn); st.add_vertex(t1)
+		st.set_normal(sn); st.add_vertex(b0)
+		st.set_normal(sn); st.add_vertex(b1)
+	_playmat_base_mesh = st.commit()
+	return _playmat_base_mesh
+
+func _create_playmat_art_material(tex: Texture2D) -> ShaderMaterial:
+	if _playmat_top_shader == null:
+		_playmat_top_shader = Shader.new()
+		_playmat_top_shader.code = """
+shader_type spatial;
+render_mode cull_back;
+uniform sampler2D playmat_tex : source_color, filter_linear_mipmap;
+uniform float aspect = 2.43137;
+uniform float corner_radius = 0.08627;
+
+float sd_round_box(vec2 p, vec2 b, float r) {
+	vec2 q = abs(p) - b + vec2(r);
+	return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void fragment() {
+	vec2 p = (UV - vec2(0.5)) * vec2(aspect, 1.0);
+	float d = sd_round_box(p, vec2(aspect * 0.5, 0.5), corner_radius);
+	if (d > 0.0) {
+		discard;
+	}
+	vec3 col = texture(playmat_tex, UV).rgb;
+	// Outer neoprene edge binding
+	if (d > -0.012) {
+		col = mix(col, vec3(0.06, 0.07, 0.09), 0.78);
+	}
+	// Stitched thread seam just inside the binding
+	if (d <= -0.012 && d >= -0.023) {
+		float perim = (abs(p.x) + abs(p.y)) * 42.0;
+		float dash = fract(perim);
+		if (dash < 0.62) {
+			col = mix(col, vec3(0.28, 0.26, 0.23), 0.50);
+		} else {
+			col *= 0.45;
+		}
+	}
+	ALBEDO = col;
+	ROUGHNESS = 0.78;
+}
+"""
+	var smat := ShaderMaterial.new()
+	smat.shader = _playmat_top_shader
+	smat.set_shader_parameter("playmat_tex", tex)
+	return smat
 
 func _get_default_player_playmat_texture() -> Texture2D:
 	if _default_player_playmat_tex != null:
@@ -396,7 +494,7 @@ func _get_default_player_playmat_texture() -> Texture2D:
 			var is_inner := (x >= 16 and x <= w - 17 and y >= 16 and y <= h - 17) and (x < 18 or x > w - 19 or y < 18 or y > h - 19)
 			if is_outer or is_inner:
 				if ((x + y) % 6) < 4:
-					img.set_pixel(x, y, Color(0.78, 0.63, 0.28, 1.0))
+					img.set_pixel(x, y, Color(0.32, 0.29, 0.22, 1.0))
 				else:
 					img.set_pixel(x, y, Color(base_r, base_g, base_b, 1.0))
 			else:
@@ -405,7 +503,7 @@ func _get_default_player_playmat_texture() -> Texture2D:
 				var dy := float(y - h / 2)
 				var rad := sqrt(dx * dx + dy * dy)
 				if absf(rad - 54.0) < 1.6 or absf(rad - 42.0) < 1.1:
-					img.set_pixel(x, y, Color(0.58, 0.48, 0.24, 1.0))
+					img.set_pixel(x, y, Color(0.28, 0.25, 0.20, 1.0))
 				else:
 					img.set_pixel(x, y, Color(clampf(base_r, 0.0, 1.0), clampf(base_g, 0.0, 1.0), clampf(base_b, 0.0, 1.0), 1.0))
 	_default_player_playmat_tex = ImageTexture.create_from_image(img)
@@ -448,10 +546,7 @@ func set_player_playmat(pid: int, file_path: String, save_to_disk: bool = true) 
 		var mi: MeshInstance3D = player_playmat_meshes[pid]
 		var top_art: MeshInstance3D = mi.get_node_or_null("TopArt")
 		var target_mi: MeshInstance3D = top_art if top_art != null else mi
-		var mat := StandardMaterial3D.new()
-		mat.albedo_texture = tex
-		mat.roughness = 0.78
-		target_mi.set_surface_override_material(0, mat)
+		target_mi.set_surface_override_material(0, _create_playmat_art_material(tex))
 	if save_to_disk:
 		_save_player_playmats()
 
@@ -774,6 +869,26 @@ func _setup_command_info_stations() -> void:
 		bg_mesh.material_override = bg_mat
 		root.add_child(bg_mesh)
 
+		var hover_area := Area3D.new()
+		hover_area.name = "StationHoverArea_%d" % pid
+		hover_area.input_ray_pickable = true
+		hover_area.set_meta("station_pid", pid)
+		var h_col := CollisionShape3D.new()
+		var h_box := BoxShape3D.new()
+		h_box.size = Vector3(1.30, 0.16, 0.60)
+		h_col.shape = h_box
+		hover_area.add_child(h_col)
+		root.add_child(hover_area)
+		var pid_cap := pid
+		hover_area.mouse_entered.connect(func():
+			if hud_manager and hud_manager.has_method("show_player_station_preview"):
+				hud_manager.show_player_station_preview(pid_cap)
+		)
+		hover_area.mouse_exited.connect(func():
+			if hud_manager and hud_manager.has_method("hide_player_station_preview"):
+				hud_manager.hide_player_station_preview()
+		)
+
 		var name_lbl := Label3D.new()
 		if BELEREN_FONT: name_lbl.font = BELEREN_FONT
 		name_lbl.text = get_player_display_name(pid)
@@ -853,12 +968,28 @@ func apply_playmat_theme(theme_id: String, _unused: String = "") -> void:
 			mat.albedo_color = Color(0.18, 0.21, 0.27, 1.0)
 			mat.roughness = 0.82
 		"wood":
-			var wt := NoiseTexture2D.new()
-			var wnl := FastNoiseLite.new(); wnl.frequency = 0.015; wnl.fractal_octaves = 4
-			wt.noise = wnl; wt.width = 256; wt.height = 256
-			mat.albedo_texture = wt
-			mat.albedo_color = Color(0.45, 0.27, 0.14, 1.0)
-			mat.roughness = 0.52
+			var wimg := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var wnl := FastNoiseLite.new()
+			wnl.frequency = 0.012
+			wnl.fractal_octaves = 4
+			for wy in range(512):
+				var plank_idx := wy / 128
+				var seam := (wy % 128) < 2
+				var plank_shift := float((plank_idx * 73) % 100)
+				for wx in range(512):
+					if seam:
+						wimg.set_pixel(wx, wy, Color(0.11, 0.06, 0.03))
+						continue
+					var n_val := wnl.get_noise_2d(float(wx) * 0.18 + plank_shift, float(wy) * 2.2)
+					var ring := sin((float(wy) * 0.22 + n_val * 14.0)) * 0.5 + 0.5
+					var grain := clampf(ring * 0.65 + (n_val + 0.5) * 0.35, 0.0, 1.0)
+					var r_col := lerpf(0.24, 0.48, grain)
+					var g_col := lerpf(0.13, 0.27, grain)
+					var b_col := lerpf(0.06, 0.13, grain)
+					wimg.set_pixel(wx, wy, Color(r_col, g_col, b_col))
+			mat.albedo_texture = ImageTexture.create_from_image(wimg)
+			mat.roughness = 0.46
+			mat.uv1_scale = Vector3(3, 3, 1)
 		"starfield":
 			var simg := Image.create(256, 256, false, Image.FORMAT_RGB8)
 			simg.fill(Color(0.05, 0.06, 0.14))
@@ -1057,12 +1188,10 @@ func setup_tabletop_layout() -> void:
 
 		var pm_mesh := MeshInstance3D.new()
 		pm_mesh.name = "Player_%d_Playmat" % pid
-		var pm_box := BoxMesh.new()
-		pm_box.size = Vector3(6.2, 0.018, 2.55)
-		pm_mesh.mesh = pm_box
+		pm_mesh.mesh = _get_rounded_playmat_base_mesh()
 		var edge_mat := StandardMaterial3D.new()
-		edge_mat.albedo_color = Color(0.07, 0.08, 0.11, 1.0)
-		edge_mat.roughness = 0.85
+		edge_mat.albedo_color = Color(0.06, 0.07, 0.09, 1.0)
+		edge_mat.roughness = 0.88
 		pm_mesh.set_surface_override_material(0, edge_mat)
 
 		var top_art := MeshInstance3D.new()
@@ -1070,11 +1199,8 @@ func setup_tabletop_layout() -> void:
 		var pm_plane := PlaneMesh.new()
 		pm_plane.size = Vector2(6.2, 2.55)
 		top_art.mesh = pm_plane
-		top_art.position = Vector3(0.0, 0.0092, 0.0)
-		var pm_mat := StandardMaterial3D.new()
-		pm_mat.albedo_texture = _get_default_player_playmat_texture()
-		pm_mat.roughness = 0.78
-		top_art.set_surface_override_material(0, pm_mat)
+		top_art.position = Vector3(0.0, 0.0094, 0.0)
+		top_art.set_surface_override_material(0, _create_playmat_art_material(_get_default_player_playmat_texture()))
 		pm_mesh.add_child(top_art)
 		if pid == local_player_id:
 			add_child(pm_mesh)
@@ -1122,6 +1248,8 @@ func setup_tabletop_layout() -> void:
 func connect_card_signals(card_node: Node3D) -> void:
 	if card_node.has_signal("card_played") and not card_node.card_played.is_connected(_on_card_played):
 		card_node.card_played.connect(_on_card_played)
+	if card_node.has_signal("card_reordered") and not card_node.card_reordered.is_connected(_reorder_hand_card):
+		card_node.card_reordered.connect(_reorder_hand_card)
 	if card_node.has_signal("card_clicked_on_battlefield") and not card_node.card_clicked_on_battlefield.is_connected(_on_card_clicked_on_battlefield):
 		card_node.card_clicked_on_battlefield.connect(_on_card_clicked_on_battlefield)
 	if card_node.has_signal("card_hovered") and not card_node.card_hovered.is_connected(_on_card_hovered):
@@ -1405,7 +1533,17 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 				matched = true
 
 			if matched:
-				collected_by_pid[perm_owner].append({"perm": perm, "trig": trig, "def_tgt": def_tgt})
+				if event_name == "ETB" and src_valid and is_etb_trigger_suppressed(source_card, perm_owner):
+					continue
+				if event_name == "DIE" and src_valid and is_die_trigger_suppressed(source_card):
+					continue
+				var mult := 1
+				if event_name == "ETB" and src_valid:
+					mult = get_etb_trigger_multiplier(source_card, perm_owner)
+				elif event_name == "DIE" and src_valid:
+					mult = get_die_trigger_multiplier(source_card)
+				for _m_i in range(mult):
+					collected_by_pid[perm_owner].append({"perm": perm, "trig": trig, "def_tgt": def_tgt})
 
 	# Push in APNAP order (Active Player first, then clockwise)
 	var apnap_order: Array[int] = []
@@ -1636,7 +1774,89 @@ func resolve_top_stack_card() -> void:
 
 # --- INPUT & INTERACTION ---
 
+var _controller_held_hand_card: Node3D = null
+var _controller_hand_reordered: bool = false
+
+func _reorder_hand_card(card_node: Node3D, dir: int) -> void:
+	if not is_instance_valid(card_node) or not (card_node in hand_cards): return
+	var idx := hand_cards.find(card_node)
+	var new_idx := clampi(idx + dir, 0, hand_cards.size() - 1)
+	if new_idx == idx: return
+	hand_cards.remove_at(idx)
+	hand_cards.insert(new_idx, card_node)
+	zone_manager.update_hand_positions(true)
+	EventBus.play_sfx("draw")
+
+func is_etb_trigger_suppressed(entering_card: Node3D, perm_owner: int) -> bool:
+	if not is_instance_valid(entering_card): return false
+	var is_creat := MagicRules.is_creature(entering_card.card_data)
+	var is_art := "artifact" in MagicRules.get_card_type_line(entering_card.card_data).to_lower()
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "don't cause abilities to trigger" in ol or "do not cause abilities to trigger" in ol:
+			if "opponents control" in ol and perm_owner == get_card_controller_id(p): continue
+			if "permanents entering" in ol: return true
+			if is_creat and ("creatures entering" in ol or "creature entering" in ol): return true
+			if is_art and "artifacts" in ol and "entering" in ol: return true
+	return false
+
+func get_etb_trigger_multiplier(entering_card: Node3D, perm_owner: int) -> int:
+	var mult := 1
+	var is_creat := MagicRules.is_creature(entering_card.card_data)
+	var is_art := "artifact" in MagicRules.get_card_type_line(entering_card.card_data).to_lower()
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		if get_card_controller_id(p) != perm_owner: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "triggers an additional time" in ol and "entering" in ol:
+			if "permanent" in ol or (is_creat and "creature" in ol) or (is_art and "artifact" in ol):
+				mult += 1
+	return mult
+
+func is_die_trigger_suppressed(dying_card: Node3D) -> bool:
+	if not is_instance_valid(dying_card): return false
+	var is_creat := MagicRules.is_creature(dying_card.card_data)
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "dying don't cause abilities to trigger" in ol and is_creat:
+			return true
+	return false
+
+func get_die_trigger_multiplier(dying_card: Node3D) -> int:
+	var mult := 1
+	var is_creat := MagicRules.is_creature(dying_card.card_data)
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "creature dying" in ol and "triggers an additional time" in ol and is_creat:
+			mult += 1
+	return mult
+
+func is_activated_ability_suppressed(card_node: Node3D) -> bool:
+	if not is_instance_valid(card_node) or not card_node.is_on_battlefield: return false
+	var tl := MagicRules.get_card_type_line(card_node.card_data).to_lower()
+	var is_art := "artifact" in tl
+	var is_creat := MagicRules.is_creature(card_node.card_data)
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "activated abilities of artifacts can't be activated" in ol and is_art: return true
+		if "activated abilities of creatures can't be activated" in ol and is_creat: return true
+	return false
+
 func _input(event: InputEvent) -> void:
+	if event is InputEventJoypadButton and not event.pressed and event.button_index == JOY_BUTTON_A:
+		if _controller_held_hand_card != null and is_instance_valid(_controller_held_hand_card):
+			var c_play := _controller_held_hand_card
+			var did_re := _controller_hand_reordered
+			_controller_held_hand_card = null
+			_controller_hand_reordered = false
+			if not did_re:
+				_on_card_played(c_play)
+			get_viewport().set_input_as_handled()
+			return
 	if event is InputEventJoypadButton and event.pressed:
 		var open_popup := _find_visible_popup_menu(get_tree().root)
 		if open_popup != null:
@@ -2074,11 +2294,15 @@ func _collect_deck_creature_types(pid: int) -> Array[String]:
 	var counts := {}
 	var pools: Array = []
 	if pid == local_player_id:
+		pools.append_array(command_zone_cards)
 		pools.append_array(hand_cards)
 		pools.append_array(library_stack)
+		pools.append_array(graveyard_stack)
 	else:
+		pools.append_array(player_command_zones.get(pid, []))
 		pools.append_array(player_hands.get(pid, []))
 		pools.append_array(player_libraries.get(pid, []))
+		pools.append_array(player_graveyards.get(pid, []))
 	for c in battlefield_non_lands:
 		if is_instance_valid(c) and get_card_owner_id(c) == pid: pools.append(c)
 	for c in pools:
@@ -2107,6 +2331,7 @@ func _apply_etb_choice_replacements(card_node: Node3D, face_index: int = 0) -> v
 			hud_manager.open_etb_creature_type_popup(card_node, types, func(chosen_t: String):
 				if is_instance_valid(card_node):
 					card_node.set_meta("chosen_creature_type", chosen_t)
+					refresh_playable_card_glows()
 			)
 		elif not types.is_empty():
 			card_node.set_meta("chosen_creature_type", types[0])
@@ -2940,6 +3165,18 @@ func _handle_joypad_button(btn_idx: int) -> void:
 		JOY_BUTTON_B:
 			close_top_modal_or_cancel()
 			vp.set_input_as_handled()
+		JOY_BUTTON_DPAD_LEFT:
+			if _controller_held_hand_card != null and is_instance_valid(_controller_held_hand_card) and (_controller_held_hand_card in hand_cards):
+				_controller_hand_reordered = true
+				_reorder_hand_card(_controller_held_hand_card, -1)
+				vp.set_input_as_handled()
+				return
+		JOY_BUTTON_DPAD_RIGHT:
+			if _controller_held_hand_card != null and is_instance_valid(_controller_held_hand_card) and (_controller_held_hand_card in hand_cards):
+				_controller_hand_reordered = true
+				_reorder_hand_card(_controller_held_hand_card, 1)
+				vp.set_input_as_handled()
+				return
 		JOY_BUTTON_A:
 			var open_popup := _find_visible_popup_menu(get_tree().root)
 			if open_popup != null:
@@ -2968,6 +3205,9 @@ func _handle_joypad_button(btn_idx: int) -> void:
 			if target_card != null and is_instance_valid(target_card):
 				if target_card.is_on_battlefield:
 					_on_card_clicked_on_battlefield(target_card, MOUSE_BUTTON_LEFT)
+				elif target_card in hand_cards:
+					_controller_held_hand_card = target_card
+					_controller_hand_reordered = false
 				else:
 					_on_card_played(target_card)
 			elif hit_obj is Node and (hit_obj as Node).has_meta("zone_kind"):
@@ -3277,6 +3517,7 @@ func _is_card_face_playable(card_node: Node3D, face_idx: int, is_commander_zone:
 
 func _has_activatable_nonmana_ability(card_node: Node3D) -> bool:
 	if not is_instance_valid(card_node) or not card_node.is_on_battlefield: return false
+	if is_activated_ability_suppressed(card_node): return false
 	if get_card_controller_id(card_node) != local_player_id: return false
 	var pa: Dictionary = card_node.parsed_abilities if "parsed_abilities" in card_node else {}
 	var is_sorc_ok: bool = turn_manager.can_act_sorcery_speed(local_player_id)
@@ -3397,3 +3638,44 @@ func _do_refresh_playable_card_glows() -> void:
 		c.set_playable_glow(ex_ok)
 	if can_act_now and turn_manager != null and not turn_manager.has_local_player_interaction():
 		turn_manager._schedule_paced_auto_pass()
+
+
+func get_player_max_hand_size(pid: int) -> int:
+	var max_h := 7
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		var ctrl_id := get_card_controller_id(p)
+		if ctrl_id == pid:
+			if "no maximum hand size" in ol:
+				return 999999
+			if "maximum hand size is increased by " in ol:
+				max_h += AbilityResolver._extract_number(ol, "maximum hand size is increased by ")
+			if "your maximum hand size is reduced by " in ol:
+				max_h -= AbilityResolver._extract_number(ol, "your maximum hand size is reduced by ")
+		else:
+			if "each opponent's maximum hand size is reduced by " in ol:
+				max_h -= AbilityResolver._extract_number(ol, "maximum hand size is reduced by ")
+			if "opponents have no maximum hand size" in ol:
+				return 999999
+	return maxi(0, max_h)
+
+func is_decision_popup_open() -> bool:
+	if hud_manager:
+		if hud_manager.active_target_callback.is_valid(): return true
+		if hud_manager.search_canvas and is_instance_valid(hud_manager.search_canvas): return true
+	for n_name in ["GenericChoiceUI", "LookAndPickUI", "ScrySurveilUI", "ModalChoiceUI", "FaceChoiceUI", "XStepperUI", "TriggerOrderUI", "DiscardHandSizeUI", "ActivatedAbilitiesUI", "ManaPopupUI"]:
+		var n := get_node_or_null(n_name)
+		if n and is_instance_valid(n) and not n.is_queued_for_deletion():
+			return true
+	return false
+
+func resume_gameplay_after_decision() -> void:
+	if mulligan_phase_active or is_decision_popup_open() or turn_manager == null:
+		return
+	var pid := turn_manager.priority_player_id
+	if ai_controller and ai_controller.should_ai_act_on_priority(pid):
+		ai_controller.schedule_ai_action(pid)
+	elif (pid == local_player_id and not turn_manager.has_local_player_interaction()) or (turn_manager.auto_pass_opponents and not is_human_seat(pid)):
+		turn_manager._schedule_paced_auto_pass()
+	refresh_playable_card_glows()

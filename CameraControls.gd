@@ -17,7 +17,8 @@ extends Camera3D
 
 @export_category("Home Settings")
 @export var home_position: Vector3 = Vector3(0.0, 3.0, 7.0)
-@export var home_rotation: Vector3 = Vector3(deg_to_rad(-51.0), 0.0, 0.0)
+@export var home_pitch_degrees: float = -48.5
+@export var home_rotation: Vector3 = Vector3(deg_to_rad(-48.5), 0.0, 0.0)
 
 @onready var target_y: float = home_position.y
 
@@ -31,6 +32,7 @@ var _touch_on_hand_card: bool = false
 @export var touch_rotate_speed: float = 0.004
 
 func _ready() -> void:
+	home_rotation.x = deg_to_rad(home_pitch_degrees)
 	position = home_position
 	rotation = home_rotation
 	target_y = home_position.y
@@ -151,6 +153,7 @@ func reset_to_home() -> void:
 	if active_tween and active_tween.is_running():
 		active_tween.kill()
 
+	home_rotation.x = deg_to_rad(home_pitch_degrees)
 	var target_quat := Quaternion.from_euler(home_rotation)
 	active_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	active_tween.tween_property(self, "position", home_position, 0.45)

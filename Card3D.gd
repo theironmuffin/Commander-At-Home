@@ -1,6 +1,7 @@
 extends Area3D
 
 signal card_played(card_node: Node3D)
+signal card_reordered(card_node: Node3D, dir: int)
 signal card_hovered(card_node: Node3D)
 signal card_unhovered(card_node: Node3D)
 signal card_clicked_on_battlefield(card_node: Node3D, button_index: int)
@@ -94,6 +95,9 @@ var _long_press_fired: bool = false
 var _touch_index: int = -1
 var _touch_down_pos: Vector2 = Vector2.ZERO
 var _touch_down_time_ms: int = 0
+var _mouse_drag_active: bool = false
+var _mouse_down_pos: Vector2 = Vector2.ZERO
+var _hand_reordered: bool = false
 
 func _ready() -> void:
 	mouse_entered.connect(_on_mouse_entered)
@@ -272,13 +276,43 @@ func refresh_visual_status() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if not _touch_active or is_on_battlefield or not is_interactive:
+	if is_on_battlefield or not is_interactive:
+		return
+	if _mouse_drag_active:
+		if event is InputEventMouseMotion:
+			var m_ev := event as InputEventMouseMotion
+			var dy: float = _mouse_down_pos.y - m_ev.position.y
+			var dx: float = m_ev.position.x - _mouse_down_pos.x
+			if front_face and dy > 0.0:
+				front_face.position.y = front_face_rest_pos.y + clampf(dy * 0.0025, 0.0, 0.4)
+			if dy >= 75.0 and dy > absf(dx) * 0.9:
+				_mouse_drag_active = false
+				if front_face: front_face.position.y = front_face_rest_pos.y
+				card_played.emit(self)
+				get_viewport().set_input_as_handled()
+			elif absf(dx) >= 42.0 and absf(dx) > absf(dy) * 1.1:
+				_hand_reordered = true
+				_mouse_down_pos.x = m_ev.position.x
+				card_reordered.emit(self, -1 if dx < 0.0 else 1)
+				get_viewport().set_input_as_handled()
+		elif event is InputEventMouseButton:
+			var mb := event as InputEventMouseButton
+			if not mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+				var dy_rel: float = _mouse_down_pos.y - mb.position.y
+				_mouse_drag_active = false
+				if front_face: front_face.position.y = front_face_rest_pos.y
+				if not _hand_reordered and dy_rel >= 55.0:
+					card_played.emit(self)
+				get_viewport().set_input_as_handled()
+		return
+	if not _touch_active:
 		return
 	if event is InputEventScreenDrag:
 		var d_ev := event as InputEventScreenDrag
 		if d_ev.index != _touch_index: return
 		var swipe_up: float = _touch_down_pos.y - d_ev.position.y
-		var swipe_x: float = absf(d_ev.position.x - _touch_down_pos.x)
+		var dx_t: float = d_ev.position.x - _touch_down_pos.x
+		var swipe_x: float = absf(dx_t)
 		if front_face and swipe_up > 0.0:
 			front_face.position.y = front_face_rest_pos.y + clampf(swipe_up * 0.0025, 0.0, 0.4)
 		if swipe_up >= 75.0 and swipe_up > swipe_x * 0.9:
@@ -287,13 +321,19 @@ func _input(event: InputEvent) -> void:
 			if front_face: front_face.position.y = front_face_rest_pos.y
 			card_played.emit(self)
 			get_viewport().set_input_as_handled()
+		elif swipe_x >= 46.0 and swipe_x > absf(swipe_up) * 1.15:
+			_hand_reordered = true
+			_long_press_fired = true
+			_touch_down_pos.x = d_ev.position.x
+			card_reordered.emit(self, -1 if dx_t < 0.0 else 1)
+			get_viewport().set_input_as_handled()
 	elif event is InputEventScreenTouch:
 		var t_ev := event as InputEventScreenTouch
 		if not t_ev.pressed and t_ev.index == _touch_index:
 			var swipe_up: float = _touch_down_pos.y - t_ev.position.y
 			_touch_active = false
 			if front_face: front_face.position.y = front_face_rest_pos.y
-			if not _long_press_fired and swipe_up >= 75.0:
+			if not _long_press_fired and not _hand_reordered and swipe_up >= 75.0:
 				card_played.emit(self)
 				get_viewport().set_input_as_handled()
 
@@ -304,6 +344,7 @@ func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _nor
 		if t_ev.pressed:
 			_touch_active = true
 			_long_press_fired = false
+			_hand_reordered = false
 			_touch_index = t_ev.index
 			_touch_down_pos = t_ev.position
 			_touch_down_time_ms = Time.get_ticks_msec()
@@ -347,7 +388,9 @@ func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _nor
 			elif event.button_index == MOUSE_BUTTON_LEFT:
 				card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_LEFT)
 		elif event.button_index == MOUSE_BUTTON_LEFT:
-			card_played.emit(self)
+			_mouse_drag_active = true
+			_hand_reordered = false
+			_mouse_down_pos = get_viewport().get_mouse_position()
 
 func set_highlight(active: bool) -> void:
 	is_highlighted = active

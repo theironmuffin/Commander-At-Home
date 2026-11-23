@@ -16,6 +16,13 @@ static var LOYALTY_REGEX: RegEx
 static var SAGA_REGEX: RegEx
 static var WARD_REGEX: RegEx
 static var PROT_REGEX: RegEx
+static var CREW_REGEX: RegEx
+static var SADDLE_REGEX: RegEx
+static var PLOT_REGEX: RegEx
+static var MADNESS_REGEX: RegEx
+static var SUSPEND_REGEX: RegEx
+static var MANA_NUM_REGEX: RegEx
+static var MANA_SYM_REGEX: RegEx
 
 static var KEYWORD_LIST: Array[String] = [
 	"flying", "first strike", "double strike", "deathtouch", "trample",
@@ -74,6 +81,20 @@ static func _ensure_regex_initialized() -> void:
 	if PROT_REGEX == null:
 		PROT_REGEX = RegEx.new()
 		PROT_REGEX.compile("protection from ([a-zA-Z\\s,]+?)(?:$|\\.|,|;)")
+		CREW_REGEX = RegEx.new()
+		CREW_REGEX.compile("^Crew\\s+(\\d+)")
+		SADDLE_REGEX = RegEx.new()
+		SADDLE_REGEX.compile("^Saddle\\s+(\\d+)")
+		PLOT_REGEX = RegEx.new()
+		PLOT_REGEX.compile("^Plot\\s+((?:\\{[^\\}]+\\})+)")
+		MADNESS_REGEX = RegEx.new()
+		MADNESS_REGEX.compile("^Madness\\s+((?:\\{[^\\}]+\\})+)")
+		SUSPEND_REGEX = RegEx.new()
+		SUSPEND_REGEX.compile("^Suspend\\s+(\\d+)[\\s—-]+((?:\\{[^\\}]+\\})+)")
+		MANA_NUM_REGEX = RegEx.new()
+		MANA_NUM_REGEX.compile("(\\d+)")
+		MANA_SYM_REGEX = RegEx.new()
+		MANA_SYM_REGEX.compile("\\{([A-Z0-9/]+)\\}")
 
 static func parse_oracle_text(oracle_text: String) -> Dictionary:
 	_ensure_regex_initialized()
@@ -229,29 +250,19 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 			parsed_data["ward_cost"] = ward_m.get_string(1).strip_edges().to_upper()
 			if not ("ward" in parsed_data["keywords"]):
 				parsed_data["keywords"].append("ward")
-		var crew_rx := RegEx.new()
-		crew_rx.compile("^Crew\\s+(\\d+)")
-		var cm := crew_rx.search(clean_line)
+		var cm := CREW_REGEX.search(clean_line)
 		if cm: parsed_data["crew_cost"] = cm.get_string(1).to_int()
 
-		var saddle_rx := RegEx.new()
-		saddle_rx.compile("^Saddle\\s+(\\d+)")
-		var sm := saddle_rx.search(clean_line)
+		var sm := SADDLE_REGEX.search(clean_line)
 		if sm: parsed_data["saddle_cost"] = sm.get_string(1).to_int()
 
-		var plot_rx := RegEx.new()
-		plot_rx.compile("^Plot\\s+((?:\\{[^\\}]+\\})+)")
-		var plm := plot_rx.search(clean_line)
+		var plm := PLOT_REGEX.search(clean_line)
 		if plm: parsed_data["plot_cost"] = plm.get_string(1)
 
-		var mad_rx := RegEx.new()
-		mad_rx.compile("^Madness\\s+((?:\\{[^\\}]+\\})+)")
-		var mm := mad_rx.search(clean_line)
+		var mm := MADNESS_REGEX.search(clean_line)
 		if mm: parsed_data["madness_cost"] = mm.get_string(1)
 
-		var susp_rx := RegEx.new()
-		susp_rx.compile("^Suspend\\s+(\\d+)[\\s—-]+((?:\\{[^\\}]+\\})+)")
-		var spm := susp_rx.search(clean_line)
+		var spm := SUSPEND_REGEX.search(clean_line)
 		if spm:
 			parsed_data["suspend_count"] = spm.get_string(1).to_int()
 			parsed_data["suspend_cost"] = spm.get_string(2)
@@ -477,17 +488,14 @@ static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) 
 
 	var oracle := str(MagicRules.get_card_attribute(card_data, "oracle_text", ""))
 	var tap_trigger_damage := 0
-	var tap_num_rx := RegEx.new()
-	tap_num_rx.compile("(\\d+)")
+	var tap_num_rx := MANA_NUM_REGEX
 	for t_line in oracle.split("\n"):
 		var tl_c := REMINDER_REGEX.sub(t_line, "", true).strip_edges().to_lower()
 		if "becomes tapped" in tl_c and "deals " in tl_c and ("damage to you" in tl_c or "damage to its controller" in tl_c):
 			var tm := tap_num_rx.search(tl_c.substr(tl_c.find("deals ")))
 			if tm: tap_trigger_damage += tm.get_string(1).to_int()
-	var sym_rx := RegEx.new()
-	sym_rx.compile("\\{([A-Z0-9/]+)\\}")
-	var num_rx := RegEx.new()
-	num_rx.compile("(\\d+)")
+	var sym_rx := MANA_SYM_REGEX
+	var num_rx := MANA_NUM_REGEX
 
 	var chosen_type: String = str(card_node.get_meta("chosen_creature_type")) if (card_node != null and is_instance_valid(card_node) and card_node.has_meta("chosen_creature_type")) else ""
 	var chosen_color: String = str(card_node.get_meta("chosen_color")) if (card_node != null and is_instance_valid(card_node) and card_node.has_meta("chosen_color")) else ""
@@ -549,7 +557,7 @@ static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) 
 		var restriction := ""
 		var restriction_text := ""
 		if "spend this mana only to cast" in eff_lower:
-			if "chosen type" in eff_lower:
+			if "chosen type" in eff_lower or "chosen creature type" in eff_lower:
 				restriction = "chosen_type"
 				restriction_text = "Only for %s spells" % (chosen_type if not chosen_type.is_empty() else "chosen type")
 			elif "creature" in eff_lower:

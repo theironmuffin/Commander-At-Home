@@ -52,6 +52,7 @@ var phase_stops: Dictionary = {}
 var pass_until_end_step: bool = false
 var hold_priority_in_response: bool = false
 var _auto_pass_timer_active: bool = false
+var _cleanup_discard_pending: bool = false
 
 func setup(main_engine: Node) -> void:
 	engine = main_engine
@@ -95,6 +96,8 @@ func has_local_player_interaction() -> bool:
 	return false
 
 func _schedule_paced_auto_pass() -> void:
+	if engine and engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open():
+		return
 	if _auto_pass_timer_active:
 		return
 	_auto_pass_timer_active = true
@@ -106,6 +109,7 @@ func _schedule_paced_auto_pass() -> void:
 		_auto_pass_timer_active = false
 		if not is_instance_valid(engine): return
 		if engine.mulligan_phase_active: return
+		if engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open(): return
 		if priority_player_id == engine.local_player_id and not has_local_player_interaction():
 			pass_priority()
 		elif auto_pass_opponents and not engine.is_human_seat(priority_player_id) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
@@ -223,7 +227,7 @@ func _should_auto_skip_current_phase() -> bool:
 		TurnPhase.COMBAT_DECLARE_BLOCKERS, TurnPhase.COMBAT_DAMAGE, TurnPhase.COMBAT_END:
 			return not engine.combat_manager.has_attackers_declared()
 		TurnPhase.CLEANUP:
-			return true
+			return not _cleanup_discard_pending
 	return false
 
 func _step_single_phase() -> void:
@@ -290,14 +294,36 @@ func _step_single_phase() -> void:
 				else: engine._draw_opponent_card(active_player_id)
 		TurnPhase.END:
 			engine.empty_mana_pool()
-			if engine.monarch_player_id == active_player_id:
-				if active_player_id == engine.local_player_id: engine.draw_card()
-				else: engine._draw_opponent_card(active_player_id)
 			for c in engine.battlefield_non_lands.duplicate():
 				if is_instance_valid(c) and c.has_meta("unearthed") and bool(c.get_meta("unearthed")):
 					c.remove_meta("unearthed")
 					engine.zone_manager.move_to_exile(c)
 			current_turn_phase = TurnPhase.CLEANUP
+			var max_h: int = engine.get_player_max_hand_size(active_player_id) if engine.has_method("get_player_max_hand_size") else 7
+			var cur_h: Array = engine.hand_cards if active_player_id == engine.local_player_id else engine.player_hands.get(active_player_id, [])
+			var excess: int = cur_h.size() - max_h
+			if excess > 0:
+				if active_player_id == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_discard_to_hand_size_popup"):
+					_cleanup_discard_pending = true
+					engine.hud_manager.open_discard_to_hand_size_popup(excess, max_h, func(chosen_cards: Array):
+						for dc in chosen_cards:
+							if is_instance_valid(dc):
+								engine.hand_cards.erase(dc)
+								engine._on_card_to_graveyard(dc)
+						engine.zone_manager.update_hand_positions(true)
+						_cleanup_discard_pending = false
+						advance_turn_phase(false)
+					)
+				else:
+					var ai_cands := cur_h.duplicate()
+					ai_cands.sort_custom(func(a: Node3D, b: Node3D): return float(a.card_data.get("cmc", 0.0)) > float(b.card_data.get("cmc", 0.0)))
+					for _di in range(mini(excess, ai_cands.size())):
+						var dc: Node3D = ai_cands[_di]
+						if is_instance_valid(dc):
+							cur_h.erase(dc)
+							if dc.has_method("make_active"): dc.make_active(dc.card_data)
+							engine._on_card_to_graveyard(dc)
+					engine.zone_manager.update_opponent_hand_positions(active_player_id)
 			for c in engine.battlefield_non_lands:
 				if is_instance_valid(c):
 					c.temp_power_modifier = 0

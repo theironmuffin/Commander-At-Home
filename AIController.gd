@@ -42,6 +42,9 @@ func schedule_ai_action(pid: int) -> void:
 		if not is_instance_valid(engine): return
 		var tm: TurnManager = engine.turn_manager
 		if not tm.auto_pass_opponents or tm.priority_player_id != pid: return
+		if engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open():
+			schedule_ai_action(pid)
+			return
 		_execute_ai_step(pid)
 	)
 

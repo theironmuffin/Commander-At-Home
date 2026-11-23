@@ -1330,7 +1330,8 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 	bg_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	popup.add_child(bg_overlay)
 	bg_overlay.gui_input.connect(func(event):
-		if event is InputEventMouseButton and event.pressed: popup.queue_free()
+		if (event is InputEventMouseButton and event.pressed) or (event is InputEventScreenTouch and event.pressed):
+			popup.queue_free()
 	)
 
 	var center := CenterContainer.new()
@@ -1408,7 +1409,7 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 
 			popup.queue_free()
 
-			var execute_activation = func(chosen_tgt: Variant):
+			var finalize_with_sac = func(chosen_tgt: Variant, sac_perm: Node3D):
 				if needs_tap and card_node.is_tapped: return
 				var eff_lower := effect_raw.to_lower()
 				if "add " in eff_lower:
@@ -1422,7 +1423,8 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 						return
 				if not mana_cost.is_empty() and not engine.can_pay_and_drain_cost(mana_cost, engine.local_player_id, {"is_activated": true}): return
 				if needs_tap: card_node.toggle_tap()
-				var requires_sacrifice := "sacrifice" in cost_raw.to_lower()
+				if sac_perm != null and is_instance_valid(sac_perm):
+					engine._on_card_to_graveyard(sac_perm)
 				if "add " in eff_lower:
 					for m in engine.MANA_SYMBOL_REGEX.search_all(effect_raw.to_upper()):
 						var c: String = m.get_string(1)
@@ -1432,8 +1434,44 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 					update_mana_ui()
 				else:
 					engine._finalize_push_ability_to_stack(card_node, ab, "Activated", chosen_tgt)
-				if requires_sacrifice and is_instance_valid(card_node):
-					engine._on_card_to_graveyard(card_node)
+
+			var execute_activation = func(chosen_tgt: Variant):
+				var cost_l := cost_raw.to_lower()
+				if not ("sacrifice" in cost_l):
+					finalize_with_sac.call(chosen_tgt, null)
+					return
+				var self_full := str(card_node.card_data.get("name", "")).to_lower().split(" // ")[0].strip_edges()
+				var self_short := self_full.split(",")[0].strip_edges() if "," in self_full else self_full
+				var is_self_sac := ("sacrifice ~" in cost_l or "sacrifice this" in cost_l or (not self_full.is_empty() and ("sacrifice " + self_full) in cost_l) or (self_short.length() >= 3 and ("sacrifice " + self_short) in cost_l))
+				if is_self_sac:
+					finalize_with_sac.call(chosen_tgt, card_node)
+					return
+				var sac_cands: Array[Node3D] = []
+				for p in engine.battlefield_non_lands + engine.battlefield_lands:
+					if not is_instance_valid(p) or not p.is_on_battlefield or engine.get_card_controller_id(p) != engine.local_player_id: continue
+					if "another" in cost_l and p == card_node: continue
+					var p_tl := MagicRules.get_card_type_line(p.card_data).to_lower()
+					if "creature" in cost_l and not MagicRules.is_creature(p.card_data): continue
+					elif "artifact" in cost_l and not ("artifact" in p_tl): continue
+					elif "enchantment" in cost_l and not ("enchantment" in p_tl): continue
+					elif "land" in cost_l and not ("nonland" in cost_l) and not MagicRules.is_land(p.card_data): continue
+					sac_cands.append(p)
+				if sac_cands.is_empty():
+					show_toast("No legal permanent to sacrifice!")
+					return
+				if sac_cands.size() == 1:
+					finalize_with_sac.call(chosen_tgt, sac_cands[0])
+					return
+				var sac_opts: Array[String] = []
+				for sc in sac_cands:
+					var sl := str(sc.card_data.get("name", "Permanent"))
+					if MagicRules.is_creature(sc.card_data):
+						sl += " (%d/%d)" % [int(sc.dynamic_power), int(sc.dynamic_toughness)]
+					sac_opts.append(sl)
+				open_choice_popup("SACRIFICE COST — CHOOSE ONE", sac_opts, func(s_idx: int):
+					if s_idx >= 0 and s_idx < sac_cands.size():
+						finalize_with_sac.call(chosen_tgt, sac_cands[s_idx])
+				)
 
 			if not target_req.is_empty():
 				start_generic_targeting("SELECT %s" % target_req.to_upper(), func(tgt): execute_activation.call(tgt), target_req, card_node)
@@ -1630,6 +1668,10 @@ func open_choice_popup(title_text: String, choice_labels: Array, on_chosen: Call
 
 	var popup := Control.new()
 	popup.name = "GenericChoiceUI"
+	popup.tree_exited.connect(func():
+		if is_instance_valid(engine) and engine.has_method("resume_gameplay_after_decision"):
+			engine.call_deferred("resume_gameplay_after_decision")
+	)
 	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
 	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
@@ -2124,6 +2166,10 @@ func open_modal_choice_popup(card_name: String, choose_count: int, allow_repeat:
 
 	var popup := Control.new()
 	popup.name = "ModalChoiceUI"
+	popup.tree_exited.connect(func():
+		if is_instance_valid(engine) and engine.has_method("resume_gameplay_after_decision"):
+			engine.call_deferred("resume_gameplay_after_decision")
+	)
 	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
 	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
@@ -3165,6 +3211,10 @@ func open_look_and_pick_popup(top_cards: Array, pick_count: int = 1, dest_zone: 
 	if top_cards.is_empty() or not engine: return
 	var lc := CanvasLayer.new()
 	lc.name = "LookAndPickUI"
+	lc.tree_exited.connect(func():
+		if is_instance_valid(engine) and engine.has_method("resume_gameplay_after_decision"):
+			engine.call_deferred("resume_gameplay_after_decision")
+	)
 	lc.layer = 55
 	engine.add_child(lc)
 
@@ -3246,3 +3296,182 @@ func open_look_and_pick_popup(top_cards: Array, pick_count: int = 1, dest_zone: 
 		c_vbox.add_child(pick_btn)
 
 	apply_custom_font(lc)
+
+func open_discard_to_hand_size_popup(discard_count: int, max_hand_size: int, on_confirmed: Callable) -> void:
+	if not engine or engine.hand_cards.is_empty():
+		on_confirmed.call([])
+		return
+	var dc_layer := CanvasLayer.new()
+	dc_layer.name = "DiscardHandSizeUI"
+	dc_layer.tree_exited.connect(func():
+		if is_instance_valid(engine) and engine.has_method("resume_gameplay_after_decision"):
+			engine.call_deferred("resume_gameplay_after_decision")
+	)
+	dc_layer.layer = 58
+	engine.add_child(dc_layer)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.80)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dc_layer.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dc_layer.add_child(center)
+
+	var panel := PanelContainer.new()
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	panel.custom_minimum_size = Vector2(minf(860.0, vp_sz.x - 28.0), minf(480.0, vp_sz.y - 36.0))
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 12)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "CLEANUP — DISCARD %d CARD(S) TO MAX HAND SIZE (%d)" % [discard_count, max_hand_size]
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
+	vbox.add_child(title)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(scroll)
+
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 12)
+	scroll.add_child(hbox)
+
+	var selected: Array = []
+	var confirm_btn := Button.new()
+	confirm_btn.text = "Confirm Discard (0/%d)" % discard_count
+	confirm_btn.disabled = true
+	confirm_btn.custom_minimum_size = Vector2(220, 40)
+
+	for c_node in engine.hand_cards:
+		if not is_instance_valid(c_node): continue
+		var c_vbox := VBoxContainer.new()
+		c_vbox.add_theme_constant_override("separation", 6)
+		hbox.add_child(c_vbox)
+
+		var tex_rect := TextureRect.new()
+		tex_rect.custom_minimum_size = Vector2(145, 202)
+		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		var img_url: String = str(MagicRules.get_card_attribute(c_node.card_data, "image_url", ""))
+		if not img_url.is_empty():
+			var cached_t = CardManager.get_cached_texture(img_url)
+			if cached_t: tex_rect.texture = cached_t
+		c_vbox.add_child(tex_rect)
+
+		var sel_btn := Button.new()
+		sel_btn.text = "Keep"
+		sel_btn.custom_minimum_size = Vector2(145, 36)
+		sel_btn.pressed.connect(func():
+			if c_node in selected:
+				selected.erase(c_node)
+				sel_btn.text = "Keep"
+			elif selected.size() < discard_count:
+				selected.append(c_node)
+				sel_btn.text = "Discard"
+			confirm_btn.disabled = (selected.size() != discard_count)
+			confirm_btn.text = "Confirm Discard (%d/%d)" % [selected.size(), discard_count]
+		)
+		c_vbox.add_child(sel_btn)
+
+	var btn_center := CenterContainer.new()
+	vbox.add_child(btn_center)
+	confirm_btn.pressed.connect(func():
+		if is_instance_valid(dc_layer): dc_layer.queue_free()
+		on_confirmed.call(selected)
+	)
+	btn_center.add_child(confirm_btn)
+	apply_custom_font(dc_layer)
+
+var player_preview_panel: PanelContainer = null
+var player_preview_label: RichTextLabel = null
+
+func show_player_station_preview(pid: int) -> void:
+	if not engine or not card_preview_canvas: return
+	if player_preview_panel == null or not is_instance_valid(player_preview_panel):
+		player_preview_panel = PanelContainer.new()
+		player_preview_panel.name = "PlayerStationPreview"
+		player_preview_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		player_preview_panel.anchor_left = 1.0; player_preview_panel.anchor_right = 1.0
+		player_preview_panel.anchor_top = 0.5; player_preview_panel.anchor_bottom = 0.5
+		player_preview_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+		player_preview_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+		player_preview_panel.offset_left = -330; player_preview_panel.offset_right = -18
+		player_preview_panel.offset_top = -170; player_preview_panel.offset_bottom = 170
+		var st := StyleBoxFlat.new()
+		st.bg_color = Color(0.08, 0.09, 0.13, 0.96); st.border_color = engine.UI_BORDER; st.set_border_width_all(2)
+		st.corner_radius_top_left = 10; st.corner_radius_top_right = 10; st.corner_radius_bottom_left = 10; st.corner_radius_bottom_right = 10
+		st.content_margin_left = 16; st.content_margin_right = 16; st.content_margin_top = 14; st.content_margin_bottom = 14
+		player_preview_panel.add_theme_stylebox_override("panel", st)
+		card_preview_canvas.add_child(player_preview_panel)
+
+		player_preview_label = RichTextLabel.new()
+		player_preview_label.bbcode_enabled = true
+		player_preview_label.fit_content = true
+		player_preview_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		player_preview_panel.add_child(player_preview_label)
+		apply_custom_font(player_preview_panel)
+
+	var p_name: String = engine.get_player_display_name(pid)
+	var is_act: bool = engine.turn_manager != null and engine.turn_manager.active_player_id == pid
+	var cur_life: int = int(engine.player_life.get(pid, 40))
+	var lines: Array[String] = []
+	lines.append("[b][color=#FFD866]%s[/color][/b]%s" % [p_name, "  [color=#59F28C](Active Turn)[/color]" if is_act else ""])
+	lines.append("Life: [b]%s[/b]" % ("DEAD" if cur_life <= 0 else str(cur_life)))
+
+	var statuses: Array[String] = []
+	if engine.monarch_player_id == pid: statuses.append("👑 Monarch")
+	if engine.initiative_player_id == pid: statuses.append("🧭 Initiative")
+	if not engine.battlefield_day_night.is_empty():
+		statuses.append("☀ Day" if engine.battlefield_day_night == "Day" else "🌙 Night")
+	for ps in engine.player_statuses.get(pid, []):
+		statuses.append(str(ps))
+	var d_info: Dictionary = engine.player_dungeons.get(pid, {})
+	if not d_info.is_empty():
+		statuses.append("🏰 %s (Room %d)" % [str(d_info.get("name", "Dungeon")), int(d_info.get("room", 1))])
+	if not statuses.is_empty():
+		lines.append("\n[color=#8CE6FF]Statuses:[/color] " + ", ".join(statuses))
+
+	var p_cnts: Dictionary = engine.player_counters.get(pid, {})
+	var cnt_parts: Array[String] = []
+	for ck in p_cnts.keys():
+		var cv: int = int(p_cnts[ck])
+		if cv > 0:
+			var extra := "/10" if str(ck) == "poison" else ""
+			cnt_parts.append("%s: %d%s" % [str(ck).capitalize(), cv, extra])
+	if not cnt_parts.is_empty():
+		lines.append("[color=#FFB86C]Counters:[/color] " + ", ".join(cnt_parts))
+
+	var cmd_map: Dictionary = engine.commander_damage.get(pid, {})
+	var cmd_parts: Array[String] = []
+	for cmd_c in cmd_map.keys():
+		var amt := int(cmd_map[cmd_c])
+		if amt > 0 and is_instance_valid(cmd_c):
+			cmd_parts.append("%s: %d/21" % [str(cmd_c.card_data.get("name", "Cmd")), amt])
+	if not cmd_parts.is_empty():
+		lines.append("\n[color=#FF7777]Commander Damage:[/color]\n  " + "\n  ".join(cmd_parts))
+
+	var hand_cnt: int = engine.hand_cards.size() if pid == engine.local_player_id else (engine.player_hands.get(pid, []) as Array).size()
+	var gy_cnt: int = engine.graveyard_stack.size() if pid == engine.local_player_id else (engine.player_graveyards.get(pid, []) as Array).size()
+	var ex_cnt: int = engine.exile_stack.size() if pid == engine.local_player_id else (engine.player_exile.get(pid, []) as Array).size()
+	var land_cnt := 0
+	var creat_cnt := 0
+	for lp in engine.battlefield_lands:
+		if is_instance_valid(lp) and engine.get_card_controller_id(lp) == pid: land_cnt += 1
+	for np in engine.battlefield_non_lands:
+		if is_instance_valid(np) and engine.get_card_controller_id(np) == pid and MagicRules.is_creature(np.card_data): creat_cnt += 1
+	lines.append("\n[color=#B8C4D8]Zones:[/color] Hand %d · Lands %d · Creatures %d · GY %d · Exile %d" % [hand_cnt, land_cnt, creat_cnt, gy_cnt, ex_cnt])
+
+	player_preview_label.text = "\n".join(lines)
+	player_preview_panel.visible = true
+
+func hide_player_station_preview() -> void:
+	if player_preview_panel and is_instance_valid(player_preview_panel):
+		player_preview_panel.visible = false
