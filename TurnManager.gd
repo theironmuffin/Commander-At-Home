@@ -238,6 +238,18 @@ func _step_single_phase() -> void:
 						c.goaded_by_player_id = 0
 						c.refresh_visual_status()
 			current_turn_phase = TurnPhase.UPKEEP
+			if engine.initiative_player_id == active_player_id and engine.has_method("advance_dungeon_for_player"):
+				engine.advance_dungeon_for_player(active_player_id, "Undercity")
+			var ex_pool: Array = engine.exile_stack if active_player_id == engine.local_player_id else engine.player_exile.get(active_player_id, [])
+			for sc in ex_pool.duplicate():
+				if is_instance_valid(sc) and sc.has_meta("suspended") and bool(sc.get_meta("suspended")) and sc.has_method("get_named_counter"):
+					var t_cnt: int = sc.get_named_counter("time")
+					if t_cnt > 0:
+						sc.modify_named_counter("time", -1)
+						if sc.get_named_counter("time") <= 0:
+							sc.remove_meta("suspended")
+							ex_pool.erase(sc)
+							engine.zone_manager.move_to_stack(sc)
 		TurnPhase.UPKEEP:
 			engine.empty_mana_pool()
 			current_turn_phase = TurnPhase.DRAW_STEP
@@ -272,6 +284,9 @@ func _step_single_phase() -> void:
 		TurnPhase.POSTCOMBAT_MAIN:
 			engine.empty_mana_pool()
 			current_turn_phase = TurnPhase.END
+			if engine.monarch_player_id == active_player_id:
+				if active_player_id == engine.local_player_id: engine.draw_card()
+				else: engine._draw_opponent_card(active_player_id)
 		TurnPhase.END:
 			engine.empty_mana_pool()
 			if engine.monarch_player_id == active_player_id:
@@ -289,8 +304,18 @@ func _step_single_phase() -> void:
 					if c.has_meta("temp_granted_keywords"): c.remove_meta("temp_granted_keywords")
 					if c.has_meta("base_pt_override"): c.remove_meta("base_pt_override")
 					if c.has_meta("pt_switched"): c.remove_meta("pt_switched")
+					if c.has_meta("crewed_until_eot"):
+						c.remove_meta("crewed_until_eot")
+						if "type_overrides" in c: c.type_overrides.erase("Creature")
+					if c.has_meta("saddled_until_eot"):
+						c.remove_meta("saddled_until_eot")
 		TurnPhase.CLEANUP:
 			engine.empty_mana_pool()
+			if engine.battlefield_day_night == "Day" and engine.spells_cast_this_turn == 0:
+				engine.set_day_night("Night")
+			elif engine.battlefield_day_night == "Night" and engine.spells_cast_this_turn >= 2:
+				engine.set_day_night("Day")
+			engine.spells_cast_this_turn = 0
 			active_player_id = get_next_player_id(active_player_id)
 			priority_player_id = active_player_id
 			if active_player_id == engine.starting_player_id:

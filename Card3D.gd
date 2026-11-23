@@ -494,6 +494,17 @@ func _tween_front_face_position(target_pos: Vector3, duration: float) -> void:
 	hover_tween.tween_property(front_face, "position", target_pos, duration)
 
 func modify_counters(amount: int) -> void:
+	if amount > 0 and is_on_battlefield and get_tree() and get_tree().current_scene:
+		var eng := get_tree().current_scene
+		if "battlefield_non_lands" in eng and eng.has_method("get_card_owner_id"):
+			var my_owner: int = eng.get_card_owner_id(self)
+			for p in eng.battlefield_lands + eng.battlefield_non_lands:
+				if not is_instance_valid(p) or eng.get_card_owner_id(p) != my_owner: continue
+				var pot := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+				if "would put one or more +1/+1 counters" in pot and "that many plus one" in pot:
+					amount += 1
+				if "would put one or more counters" in pot and "twice that many" in pot:
+					amount *= 2
 	counter_amount += amount
 	var eb := get_node_or_null("/root/EventBus")
 	if eb and eb.has_method("play_sfx") and amount != 0:

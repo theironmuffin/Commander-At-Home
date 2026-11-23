@@ -162,12 +162,14 @@ static func is_legal_target(target_node: Variant, requirement: String, caster_id
 	if source_card != null and has_protection_from(target_node, source_card):
 		return false
 
-	# Shroud blocks all targeting; Hexproof blocks opponents
+	# Shroud blocks all targeting; Hexproof / Hexproof from [X] blocks opponents
 	if target_node.has_method("has_keyword"):
 		if bool(target_node.has_keyword("shroud")):
 			return false
 		var target_owner: int = int(target_node.get_meta("owner_id")) if target_node.has_meta("owner_id") else 1
 		if bool(target_node.has_keyword("hexproof")) and target_owner != caster_id:
+			return false
+		if target_owner != caster_id and source_card != null and has_hexproof_from(target_node, source_card):
 			return false
 
 	var req := requirement.to_lower().strip_edges()
@@ -182,6 +184,9 @@ static func is_legal_target(target_node: Variant, requirement: String, caster_id
 
 	var face_idx: int = int(target_node.get("active_face_index")) if "active_face_index" in target_node else 0
 	var type_line := get_card_type_line(target_node.card_data, face_idx).to_lower()
+	if "type_overrides" in target_node:
+		for ov in target_node.type_overrides:
+			type_line += " " + str(ov).to_lower()
 
 	if "nonland permanent" in req and "land" in type_line:
 		return false
@@ -259,4 +264,50 @@ static func has_protection_from(target_node: Node3D, source_card: Node3D) -> boo
 		if p == "everything": return true
 		if p in src_color_words: return true
 		if p.trim_suffix("s") in src_tl: return true
+	return false
+
+
+static func has_hexproof_from(target_node: Node3D, source_card: Node3D) -> bool:
+	if not target_node or not is_instance_valid(target_node) or not source_card or not is_instance_valid(source_card):
+		return false
+	var pa: Variant = target_node.get("parsed_abilities")
+	if not (pa is Dictionary): return false
+	var hf_list: Array = pa.get("hexproof_from", [])
+	if hf_list.is_empty(): return false
+	var src_tl := get_card_type_line(source_card.card_data).to_lower()
+	var src_colors: Array = source_card.card_data.get("colors", [])
+	var color_names := {"W": "white", "U": "blue", "B": "black", "R": "red", "G": "green"}
+	var src_color_words: Array[String] = []
+	for c in src_colors:
+		if color_names.has(str(c)): src_color_words.append(color_names[str(c)])
+	for hf in hf_list:
+		var h := str(hf).to_lower()
+		if h in src_color_words: return true
+		if h.trim_suffix("s") in src_tl: return true
+	return false
+
+static func is_damage_unpreventable(source_card: Node3D, engine: Node = null) -> bool:
+	if source_card and is_instance_valid(source_card):
+		var ot := str(get_card_attribute(source_card.card_data, "oracle_text", "")).to_lower()
+		if "damage can't be prevented" in ot: return true
+	if engine:
+		for p in engine.battlefield_lands + engine.battlefield_non_lands:
+			if not is_instance_valid(p): continue
+			var pot := str(get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+			if "damage can't be prevented" in pot: return true
+	return false
+
+static func is_spell_uncounterable(spell_node: Node3D, engine: Node = null) -> bool:
+	if not spell_node or not is_instance_valid(spell_node): return false
+	var ot := str(get_card_attribute(spell_node.card_data, "oracle_text", "")).to_lower()
+	if "this spell can't be countered" in ot or "can't be countered" in ot:
+		return true
+	if engine:
+		var caster_id: int = engine.get_card_owner_id(spell_node)
+		var tl := get_card_type_line(spell_node.card_data).to_lower()
+		for p in engine.battlefield_lands + engine.battlefield_non_lands:
+			if not is_instance_valid(p) or engine.get_card_owner_id(p) != caster_id: continue
+			var pot := str(get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+			if "spells you control can't be countered" in pot: return true
+			if "creature spells you control can't be countered" in pot and "creature" in tl: return true
 	return false

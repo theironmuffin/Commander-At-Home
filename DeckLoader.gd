@@ -726,7 +726,9 @@ func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, r
 		var ai_lands := 0
 		for hc in engine.player_hands[pid]:
 			if is_instance_valid(hc) and MagicRules.is_land(hc.card_data): ai_lands += 1
-		if (ai_lands <= 1 or ai_lands >= 6) and shuffled.size() >= 14:
+		var ai_diff: int = int(engine.ai_controller.difficulty) if engine.ai_controller else 1
+		var bad_hand: bool = (ai_lands <= 1 or ai_lands >= 6) if ai_diff < 2 else (ai_lands < 2 or ai_lands > 4)
+		if bad_hand and shuffled.size() >= 14:
 			for hc in engine.player_hands[pid]:
 				if is_instance_valid(hc): hc.queue_free()
 			engine.player_hands[pid].clear()

@@ -1,7 +1,10 @@
 class_name AIController
 extends Node
 
+enum Difficulty { CASUAL, TUNED, CEDH }
+
 var engine: Node = null
+var difficulty: int = Difficulty.TUNED
 var _is_thinking: bool = false
 var _responded_stack_ids: Dictionary = {}
 
@@ -82,6 +85,17 @@ func _run_ai_stack_response(pid: int) -> void:
 	_responded_stack_ids[item_id] = true
 	if engine.get_card_owner_id(top_item) == pid: return
 
+	var top_ol := str(MagicRules.get_card_attribute(top_item.card_data, "oracle_text", "")).to_lower()
+	var top_cmc := float(top_item.card_data.get("cmc", 0.0))
+	var top_is_cmd: bool = top_item.has_meta("is_commander") and bool(top_item.get_meta("is_commander"))
+	var is_high_threat: bool = top_is_cmd or top_cmc >= 4.0 or "destroy all" in top_ol or "exile all" in top_ol or "extra turn" in top_ol or "search your library" in top_ol
+	if difficulty == Difficulty.CASUAL and not is_high_threat and randf() > 0.45:
+		return
+	elif difficulty == Difficulty.TUNED and not is_high_threat and top_cmc < 3.0:
+		return
+	elif difficulty == Difficulty.CEDH and not is_high_threat and top_cmc < 2.0:
+		return
+
 	for card in engine.player_hands.get(pid, []).duplicate():
 		if not is_instance_valid(card): continue
 		var tl := MagicRules.get_card_type_line(card.card_data).to_lower()
@@ -89,6 +103,7 @@ func _run_ai_stack_response(pid: int) -> void:
 		if not ("instant" in tl and "counter target" in ol): continue
 		var req := OracleParser.extract_target_requirement(ol)
 		if not MagicRules.is_legal_target(top_item, req, pid, card): continue
+		if MagicRules.is_spell_uncounterable(top_item, engine): continue
 		var mana_cost := str(card.card_data.get("mana_cost", ""))
 		if engine.can_pay_and_drain_cost(mana_cost, pid):
 			card.set_meta("chosen_target", top_item)
@@ -120,9 +135,23 @@ func _run_ai_main_phase(pid: int) -> void:
 			candidates.append(cmd)
 
 	candidates.sort_custom(func(a: Node3D, b: Node3D): return _score_ai_cast_priority(a, pid) > _score_ai_cast_priority(b, pid))
+	var my_pow := 0
+	var max_opp_pow := 0
+	var opp_pows := {}
+	for p_c in engine.battlefield_non_lands:
+		if not is_instance_valid(p_c) or not p_c.is_on_battlefield or not MagicRules.is_creature(p_c.card_data): continue
+		var p_own: int = engine.get_card_owner_id(p_c)
+		var pw: int = maxi(0, int(p_c.dynamic_power))
+		if p_own == pid: my_pow += pw
+		else: opp_pows[p_own] = int(opp_pows.get(p_own, 0)) + pw
+	for op_k in opp_pows.keys(): max_opp_pow = maxi(max_opp_pow, int(opp_pows[op_k]))
+
 	for card in candidates:
 		var type_line := MagicRules.get_card_type_line(card.card_data).to_lower()
 		var oracle_lower := str(MagicRules.get_card_attribute(card.card_data, "oracle_text", "")).to_lower()
+		var is_wipe := "destroy all creatures" in oracle_lower or "exile all creatures" in oracle_lower
+		if is_wipe and difficulty != Difficulty.CASUAL and my_pow >= max_opp_pow:
+			continue
 		if "instant" in type_line and not MagicRules.can_cast_at_instant_speed(card.card_data, 0, pid, engine):
 			continue
 		if ("sorcery" in type_line or "aura" in type_line) and ("target" in oracle_lower or "aura" in type_line):
@@ -154,8 +183,9 @@ func _run_ai_main_phase(pid: int) -> void:
 			engine.zone_manager.move_to_stack(card)
 			return
 
-	# 3. Equip unattached Equipment onto best AI creature (only if stack is still empty)
+	# 3. Activate Planeswalker loyalty & card-draw/utility abilities, then equip
 	if engine.active_stack.is_empty():
+		_activate_ai_planeswalkers_and_abilities(pid)
 		_equip_ai_equipment(pid)
 
 func _score_ai_cast_priority(card: Node3D, pid: int) -> int:
@@ -321,14 +351,84 @@ func _score_blocker(atk: Node3D, blk: Node3D, my_life: int) -> int:
 
 func _pick_target_opponent(my_pid: int) -> int:
 	var best_pid := -1
-	var best_life := -9999
+	var best_score := -99999
 	for pid in [1, 2, 3, 4]:
 		if pid == my_pid: continue
+		if engine.has_method("is_player_eliminated") and engine.is_player_eliminated(pid): continue
 		var life_val: int = int(engine.player_life.get(pid, 0))
-		if life_val > 0 and life_val > best_life:
-			best_life = life_val
+		if life_val <= 0: continue
+		if difficulty == Difficulty.CASUAL:
+			if life_val > best_score:
+				best_score = life_val
+				best_pid = pid
+			continue
+
+		var threat := int(life_val * 0.25)
+		threat += engine.player_hands.get(pid, []).size() * 2
+		if life_val <= 15: threat += 15
+		for perm in engine.battlefield_non_lands:
+			if not is_instance_valid(perm) or not perm.is_on_battlefield: continue
+			if engine.get_card_owner_id(perm) != pid: continue
+			if MagicRules.is_creature(perm.card_data):
+				threat += maxi(0, int(perm.dynamic_power)) * 3
+			var ol := str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "")).to_lower()
+			if "draw " in ol or MagicRules.is_planeswalker(perm.card_data):
+				threat += 6
+		var my_cmd_dmg: Dictionary = engine.commander_damage.get(my_pid, {})
+		for cmd_c in my_cmd_dmg.keys():
+			if is_instance_valid(cmd_c) and engine.get_card_owner_id(cmd_c) == pid:
+				threat += int(my_cmd_dmg[cmd_c]) * 2
+		if threat > best_score:
+			best_score = threat
 			best_pid = pid
 	return best_pid
+
+func _activate_ai_planeswalkers_and_abilities(pid: int) -> void:
+	for card in engine.battlefield_non_lands.duplicate():
+		if not is_instance_valid(card) or not card.is_on_battlefield: continue
+		if engine.get_card_owner_id(card) != pid: continue
+		var pa: Dictionary = card.parsed_abilities if "parsed_abilities" in card else {}
+
+		# Planeswalker loyalty abilities (once per turn)
+		if MagicRules.is_planeswalker(card.card_data) and "loyalty_activated_this_turn" in card and not bool(card.loyalty_activated_this_turn):
+			var l_abs: Array = pa.get("loyalty_abilities", [])
+			var cur_loy: int = card.get_named_counter("loyalty") if card.has_method("get_named_counter") else 0
+			var chosen_ab: Dictionary = {}
+			var chosen_delta := -99
+			for lab in l_abs:
+				var d_str: String = str(lab.get("delta_str", "0"))
+				if "X" in d_str.to_upper(): continue
+				var delta: int = d_str.to_int()
+				if delta < 0 and cur_loy + delta < 0: continue
+				if chosen_ab.is_empty() or (delta < 0 and abs(delta) >= 5 and cur_loy + delta >= 0) or (delta > chosen_delta):
+					chosen_ab = lab
+					chosen_delta = delta
+			if not chosen_ab.is_empty():
+				card.modify_named_counter("loyalty", chosen_delta)
+				card.loyalty_activated_this_turn = true
+				var eff_l := str(chosen_ab.get("effect_raw", "")).to_lower()
+				var tgt: Variant = pick_ai_target(pid, eff_l) if "target" in eff_l else null
+				engine._finalize_push_ability_to_stack(card, chosen_ab, "Loyalty", tgt)
+				return
+
+		# Non-mana utility / card-draw / token abilities
+		for ab in pa.get("activated_abilities", []):
+			var cost_raw := str(ab.get("cost_raw", ""))
+			var eff_raw := str(ab.get("effect_raw", ""))
+			var eff_l := eff_raw.to_lower()
+			if "add " in eff_l or "sacrifice" in cost_raw.to_lower(): continue
+			if not ("draw " in eff_l or "create " in eff_l or "scry " in eff_l): continue
+			var needs_tap := "{T}" in cost_raw.to_upper()
+			if needs_tap and (card.is_tapped or (MagicRules.is_creature(card.card_data) and card.has_summoning_sickness)): continue
+			var m_cost := ""
+			for m in engine.MANA_COST_REGEX.search_all(cost_raw):
+				var sym: String = str(m.get_string(1)).to_upper()
+				if sym != "T" and sym != "Q": m_cost += "{" + sym + "}"
+			if not m_cost.is_empty() and not engine.can_pay_and_drain_cost(m_cost, pid, {"is_activated": true}): continue
+			if needs_tap: card.toggle_tap()
+			var tgt: Variant = pick_ai_target(pid, eff_l) if "target" in eff_l else null
+			engine._finalize_push_ability_to_stack(card, ab, "Activated", tgt)
+			return
 
 func pick_ai_target(ai_pid: int, effect_lower: String) -> Variant:
 	if "creature you control" in effect_lower:

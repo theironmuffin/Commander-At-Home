@@ -20,10 +20,12 @@ func update_zone_counters() -> void:
 
 func update_commander_tax_counter() -> void:
 	if engine.commander_count_label:
-		var total_casts := 0
-		for c in engine.command_zone_cards:
-			total_casts += int(engine.commander_cast_counts.get(c, 0))
-		engine.commander_count_label.text = str(total_casts) if total_casts > 0 else "0"
+		var cmd_list: Array = engine.player_command_zones.get(engine.local_player_id, engine.command_zone_cards)
+		var parts: Array[String] = []
+		for c in cmd_list:
+			if is_instance_valid(c):
+				parts.append(str(int(engine.commander_cast_counts.get(c, 0)) * 2))
+		engine.commander_count_label.text = " / ".join(parts) if not parts.is_empty() else "0"
 
 func untap_single_card(card_node: Node3D) -> void:
 	if card_node:
@@ -403,6 +405,7 @@ func move_to_stack(card_node: Node3D) -> void:
 	update_zone_counters()
 	EventBus.notify_stack(engine.active_stack.size())
 	engine.check_and_queue_triggers("CAST", card_node)
+	if engine.has_method("on_spell_cast_mechanics"): engine.on_spell_cast_mechanics(card_node)
 
 func _check_commander_redirect(card_node: Node3D, dest_name: String, leave_fn: Callable) -> bool:
 	if not card_node or not is_instance_valid(card_node): return false

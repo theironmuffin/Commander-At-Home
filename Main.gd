@@ -110,6 +110,9 @@ var mulligan_count: int = 0
 var mulligan_bottom_remaining: int = 0
 var hovered_card: Node3D = null
 var _last_upkeep_trigger_key: String = ""
+var spells_cast_this_turn: int = 0
+var undo_stack: Array[Dictionary] = []
+const SAVE_GAME_PATH = "user://savegame.json"
 var _legend_rule_pending: bool = false
 var eliminated_players: Dictionary = {}
 var game_over_shown: bool = false
@@ -307,14 +310,38 @@ func set_initiative(pid: int, from_network: bool = false) -> void:
 	if not from_network and is_network_multiplayer():
 		network_manager.dispatch_game_action("SET_INITIATIVE", {"pid": pid})
 	initiative_player_id = pid
+	if pid > 0:
+		advance_dungeon_for_player(pid, "Undercity")
 	refresh_command_info_stations()
 	if hud_manager: hud_manager.update_phase_ui()
 
 func set_day_night(state_str: String, from_network: bool = false) -> void:
 	if not from_network and is_network_multiplayer():
 		network_manager.dispatch_game_action("SET_DAY_NIGHT", {"state": state_str})
+	var changed := (battlefield_day_night != state_str)
 	battlefield_day_night = state_str
+	if changed and (state_str == "Day" or state_str == "Night"):
+		var want_face := 1 if state_str == "Night" else 0
+		for perm in battlefield_non_lands:
+			if not is_instance_valid(perm): continue
+			var ot_f0 := str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "", 0)).to_lower()
+			if ("daybound" in ot_f0 or "nightbound" in ot_f0) and "active_face_index" in perm and int(perm.active_face_index) != want_face:
+				if perm.has_method("transform_card"):
+					perm.transform_card()
+	refresh_command_info_stations()
 	if hud_manager: hud_manager.update_phase_ui()
+
+func advance_dungeon_for_player(pid: int, dungeon_name: String = "Undercity") -> void:
+	var cur_d: Dictionary = player_dungeons.get(pid, {})
+	if cur_d.is_empty():
+		set_player_dungeon(pid, dungeon_name, 1)
+	else:
+		var next_rm: int = int(cur_d.get("room", 1)) + 1
+		if next_rm > 4:
+			player_dungeons.erase(pid)
+			refresh_command_info_stations()
+		else:
+			set_player_dungeon(pid, str(cur_d.get("name", dungeon_name)), next_rm)
 
 func set_player_dungeon(pid: int, dungeon_name: String, room_num: int) -> void:
 	if dungeon_name.is_empty():
@@ -903,6 +930,20 @@ func get_taxed_mana_cost(card_node: Node3D) -> String:
 
 func run_state_based_actions() -> void:
 	ContinuousEffectsEngine.recalculate_layers(battlefield_lands, battlefield_non_lands, self)
+	var perm_counts := {1: 0, 2: 0, 3: 0, 4: 0}
+	var has_ascend := {1: false, 2: false, 3: false, 4: false}
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p): continue
+		var c_id: int = get_card_controller_id(p)
+		perm_counts[c_id] = int(perm_counts.get(c_id, 0)) + 1
+		var ot_l := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "ascend" in ot_l: has_ascend[c_id] = true
+		if battlefield_day_night.is_empty() and "daybound" in ot_l:
+			set_day_night("Day")
+	for pid_a in [1, 2, 3, 4]:
+		if bool(has_ascend.get(pid_a, false)) and int(perm_counts.get(pid_a, 0)) >= 10:
+			if not ("City's Blessing" in player_statuses.get(pid_a, [])):
+				toggle_player_status(pid_a, "City's Blessing")
 
 	var dead_creatures: Array[Node3D] = []
 	var unattached_auras: Array[Node3D] = []
@@ -1033,6 +1074,7 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 	var src_type := MagicRules.get_card_type_line(source_card.card_data).to_lower() if src_valid else ""
 	var src_owner := get_card_owner_id(source_card) if src_valid else -1
 
+	var collected_by_pid: Dictionary = {1: [], 2: [], 3: [], 4: []}
 	for perm in all_permanents:
 		if not is_instance_valid(perm) or not perm.has_method("get_triggered_abilities"): continue
 		var perm_name := str(perm.card_data.get("name", "")).to_lower()
@@ -1040,49 +1082,67 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 
 		for trig in perm.get_triggered_abilities():
 			var event_raw: String = str(trig.get("trigger_event_raw", "")).to_lower()
+			var matched := false
+			var def_tgt: Variant = null
 
 			if event_name == "ETB" and src_valid and ("enters the battlefield" in event_raw or "enters" in event_raw):
 				if "enters tapped" in event_raw or "enters with" in event_raw: continue
 				var is_self: bool = ("this " in event_raw or "~" in event_raw or (not perm_name.is_empty() and perm_name in event_raw)) and not ("another" in event_raw)
 				if is_self:
-					if perm == source_card: _push_ability_to_stack(perm, trig, "Triggered")
-					continue
-				if "another" in event_raw and perm == source_card: continue
-				if "you control" in event_raw and src_owner != perm_owner: continue
-				if "creature" in event_raw and not ("creature" in src_type): continue
-				if "land" in event_raw and not ("land" in src_type): continue
-				if "artifact" in event_raw and not ("artifact" in src_type): continue
-				if "enchantment" in event_raw and not ("enchantment" in src_type): continue
-				_push_ability_to_stack(perm, trig, "Triggered")
-
+					if perm == source_card: matched = true
+				elif not ("another" in event_raw and perm == source_card):
+					if "you control" in event_raw and src_owner != perm_owner: continue
+					if "creature" in event_raw and not ("creature" in src_type): continue
+					if "land" in event_raw and not ("land" in src_type): continue
+					if "artifact" in event_raw and not ("artifact" in src_type): continue
+					if "enchantment" in event_raw and not ("enchantment" in src_type): continue
+					matched = true
 			elif event_name == "DIE" and src_valid and ("dies" in event_raw or "put into a graveyard" in event_raw):
 				if source_card == perm or ("another" in event_raw and source_card != perm) or ("a creature" in event_raw and "creature" in src_type):
-					_push_ability_to_stack(perm, trig, "Triggered")
-
+					matched = true
 			elif event_name == "UPKEEP" and "beginning of" in event_raw and "upkeep" in event_raw:
 				if "your upkeep" in event_raw and perm_owner != turn_manager.active_player_id: continue
-				_push_ability_to_stack(perm, trig, "Triggered")
-
+				matched = true
 			elif event_name == "END_STEP" and "beginning of" in event_raw and "end step" in event_raw:
 				if "your end step" in event_raw and perm_owner != turn_manager.active_player_id: continue
-				_push_ability_to_stack(perm, trig, "Triggered")
-
+				matched = true
 			elif (event_name == "ATTACK" and src_valid and "attacks" in event_raw) or (event_name == "BLOCK" and src_valid and "blocks" in event_raw):
 				var is_ctrl_trigger: bool = ("creature you control" in event_raw and src_owner == perm_owner)
 				if perm == source_card or is_ctrl_trigger:
 					var eff_l: String = str(trig.get("effect_raw", "")).to_lower()
-					var def_tgt: Variant = source_card if (not ("target" in eff_l)) else null
-					_push_ability_to_stack(perm, trig, "Triggered", def_tgt)
-
+					def_tgt = source_card if (not ("target" in eff_l)) else null
+					matched = true
 			elif event_name == "COMBAT_DAMAGE_PLAYER" and src_valid and "combat damage" in event_raw and "player" in event_raw:
 				if perm == source_card or ("creature you control deals combat damage" in event_raw and src_owner == perm_owner):
-					_push_ability_to_stack(perm, trig, "Triggered")
-
+					matched = true
 			elif event_name == "CAST" and src_valid and "you cast" in event_raw and src_owner == perm_owner:
 				if "instant or sorcery" in event_raw and not ("instant" in src_type or "sorcery" in src_type): continue
 				if "creature spell" in event_raw and not ("creature" in src_type): continue
 				if "noncreature" in event_raw and ("creature" in src_type): continue
-				_push_ability_to_stack(perm, trig, "Triggered")
+				matched = true
+
+			if matched:
+				collected_by_pid[perm_owner].append({"perm": perm, "trig": trig, "def_tgt": def_tgt})
+
+	# Push in APNAP order (Active Player first, then clockwise)
+	var apnap_order: Array[int] = []
+	var cur_p: int = turn_manager.active_player_id
+	for _i in range(4):
+		if not (cur_p in apnap_order): apnap_order.append(cur_p)
+		cur_p = turn_manager.get_next_player_id(cur_p)
+
+	for pid in apnap_order:
+		var arr: Array = collected_by_pid.get(pid, [])
+		if arr.is_empty(): continue
+		if pid == local_player_id and arr.size() >= 2 and hud_manager and hud_manager.has_method("open_trigger_order_popup"):
+			hud_manager.open_trigger_order_popup(arr, func(ordered_arr: Array):
+				for item in ordered_arr:
+					if is_instance_valid(item["perm"]):
+						_push_ability_to_stack(item["perm"], item["trig"], "Triggered", item["def_tgt"])
+			)
+		else:
+			for item in arr:
+				_push_ability_to_stack(item["perm"], item["trig"], "Triggered", item["def_tgt"])
 
 func _push_ability_to_stack(source_card: Node3D, ability_data: Dictionary, ability_type: String, default_target: Variant = null) -> void:
 	var effect_raw: String = str(ability_data.get("effect_raw", ""))
@@ -1368,6 +1428,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 
 	match k:
+		KEY_Z:
+			undo_last_action(); get_viewport().set_input_as_handled()
 		KEY_D:
 			if turn_manager.is_local_player_turn(): zone_manager.draw_card(); get_viewport().set_input_as_handled()
 		KEY_U:
@@ -1495,6 +1557,7 @@ func _on_tutor_card_selected(card_node: Node3D) -> void:
 	zone_manager.shuffle_library()
 
 func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUSE_BUTTON_LEFT) -> void:
+	if not is_network_multiplayer() and not hud_manager.active_target_callback.is_valid(): push_undo_snapshot()
 	if hud_manager.active_target_callback.is_valid():
 		hud_manager.select_target(card_node)
 		return
@@ -1570,6 +1633,7 @@ func finish_mulligan_phase() -> void:
 	turn_manager.advance_turn_phase(false)
 
 func _on_card_played(card_node: Node3D) -> void:
+	if not is_network_multiplayer() and not (card_node in active_stack): push_undo_snapshot()
 	if hud_manager.active_target_callback.is_valid() and card_node in active_stack:
 		hud_manager.select_target(card_node)
 		return
@@ -1618,6 +1682,29 @@ func _on_card_played(card_node: Node3D) -> void:
 		)
 		return
 
+	if card_node in hand_cards and turn_manager.is_local_player_turn() and "parsed_abilities" in card_node:
+		var pa_h: Dictionary = card_node.parsed_abilities
+		var ft_c: String = str(pa_h.get("foretell_cost", ""))
+		var pl_c: String = str(pa_h.get("plot_cost", ""))
+		var sp_n: int = int(pa_h.get("suspend_count", 0))
+		var sp_c: String = str(pa_h.get("suspend_cost", ""))
+		if not ft_c.is_empty() or not pl_c.is_empty() or (sp_n > 0 and not sp_c.is_empty()):
+			var alt_opts: Array[String] = ["Cast Normally"]
+			if not ft_c.is_empty(): alt_opts.append("Foretell ({2})")
+			if not pl_c.is_empty(): alt_opts.append("Plot (%s)" % pl_c)
+			if sp_n > 0 and not sp_c.is_empty(): alt_opts.append("Suspend %d (%s)" % [sp_n, sp_c])
+			hud_manager.open_choice_popup(str(card_node.card_data.get("name", "Card")).to_upper(), alt_opts, func(idx: int):
+				var chosen_lbl := alt_opts[idx]
+				if chosen_lbl == "Cast Normally":
+					_cast_card_face(card_node, 0, false)
+				elif chosen_lbl.begins_with("Foretell"):
+					exile_with_alt_mechanic(card_node, "foretell", "{2}")
+				elif chosen_lbl.begins_with("Plot"):
+					exile_with_alt_mechanic(card_node, "plot", pl_c)
+				elif chosen_lbl.begins_with("Suspend"):
+					exile_with_alt_mechanic(card_node, "suspend", sp_c, sp_n)
+			)
+			return
 	_cast_card_face(card_node, 0, false)
 
 
@@ -1633,6 +1720,10 @@ func _does_mana_match_context(restriction: String, chosen_type: String, spell_co
 		"planeswalker": return (not is_act) and ("planeswalker" in tl)
 		"instant_or_sorcery": return (not is_act) and ("instant" in tl or "sorcery" in tl)
 		"commander": return (not is_act) and bool(spell_context.get("is_commander", false))
+		"legendary": return (not is_act) and ("legendary" in tl)
+		"multicolored": return (not is_act) and bool(spell_context.get("is_multicolored", false))
+		"non_nonartifact": return is_act or ("artifact" in tl)
+		"non_creature": return is_act or not ("creature" in tl)
 		"chosen_type":
 			if is_act or not ("creature" in tl): return false
 			if chosen_type.is_empty(): return true
@@ -1828,6 +1919,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 		zone_manager.update_battlefield_positions(true)
 		run_state_based_actions()
 	else:
+		if has_split_second_on_stack(): return
 		if not is_instant and not turn_manager.can_act_sorcery_speed(local_player_id): return
 		if is_instant and not turn_manager.holds_priority(local_player_id): return
 		var mana_cost := ""
@@ -1849,7 +1941,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 			var final_mana_cost := ContinuousEffectsEngine.apply_cost_reduction(raw_mana_cost, red)
 			if add_life_amt > 0 and int(player_life.get(local_player_id, 0)) <= add_life_amt:
 				return
-			if not can_pay_and_drain_cost(final_mana_cost, local_player_id, {"type_line": type_line, "is_commander": card_node in command_zone_cards, "is_activated": false}):
+			if not can_pay_and_drain_cost(final_mana_cost, local_player_id, {"type_line": type_line, "is_commander": card_node in command_zone_cards, "is_activated": false, "is_multicolored": card_node.card_data.get("colors", []).size() > 1}):
 				if card_node.has_meta("chosen_target"): card_node.remove_meta("chosen_target")
 				return
 			if sac_node != null and is_instance_valid(sac_node):
@@ -2160,7 +2252,18 @@ func spawn_mana_produced_animation(card_node: Variant, colors: Array) -> void:
 		tween.tween_property(sprite, "modulate:a", 0.0, 1.2)
 		tween.chain().tween_callback(func(): sprite.queue_free())
 
-func _spawn_new_token(token_data: Dictionary) -> void:
+func _spawn_new_token(token_data: Dictionary, count: int = 1) -> void:
+	var owner_id: int = turn_manager.active_player_id
+	var final_count: int = count
+	for p in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(p) or get_card_owner_id(p) != owner_id: continue
+		var pot := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+		if "would create one or more tokens" in pot and "twice that many" in pot:
+			final_count *= 2
+	for _t_i in range(final_count):
+		_spawn_single_token_instance(token_data)
+
+func _spawn_single_token_instance(token_data: Dictionary) -> void:
 	EventBus.play_sfx("token")
 	var token: Node3D = _instantiate_card()
 	token.card_data = token_data.duplicate(true)
@@ -2621,3 +2724,152 @@ func _on_network_action_received(sender_seat: int, action_type: String, payload:
 			set_initiative(int(payload.get("pid", sender_seat)), true)
 		"SET_DAY_NIGHT":
 			set_day_night(str(payload.get("state", "")), true)
+		"STATE_RESYNC":
+			GameSerializer.restore_state(self, payload)
+
+
+func has_split_second_on_stack() -> bool:
+	for item in active_stack:
+		if item is Node3D and is_instance_valid(item) and "parsed_abilities" in item:
+			if bool(item.parsed_abilities.get("has_split_second", false)):
+				return true
+	return false
+
+func on_spell_cast_mechanics(card_node: Node3D) -> void:
+	spells_cast_this_turn += 1
+	if not is_instance_valid(card_node) or not ("parsed_abilities" in card_node): return
+	var pa: Dictionary = card_node.parsed_abilities
+	var owner_id: int = get_card_owner_id(card_node)
+	if bool(pa.get("has_storm", false)) and spells_cast_this_turn > 1:
+		var face_idx: int = int(card_node.get("active_face_index")) if "active_face_index" in card_node else 0
+		var eff := str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_idx))
+		var tgt_ref: Variant = card_node.get_meta("chosen_target") if card_node.has_meta("chosen_target") else null
+		var t_req: String = str(card_node.get_meta("target_requirement")) if card_node.has_meta("target_requirement") else ""
+		for _s in range(spells_cast_this_turn - 1):
+			_finalize_push_ability_to_stack(card_node, {"effect_raw": eff, "target_requirement": t_req}, "Storm Copy", tgt_ref)
+	if bool(pa.get("has_cascade", false)):
+		var cmc_val := int(float(card_node.card_data.get("cmc", 0.0)))
+		if cmc_val > 0:
+			trigger_cascade_or_discover(owner_id, cmc_val - 1, false)
+
+func trigger_cascade_or_discover(owner_id: int, max_cmc: int, is_discover: bool) -> void:
+	var lib: Array = library_stack if owner_id == local_player_id else player_libraries.get(owner_id, [])
+	if lib.is_empty(): return
+	var exiled_temp: Array[Node3D] = []
+	var hit_card: Node3D = null
+	while not lib.is_empty():
+		var top_c: Node3D = lib.pop_back()
+		exiled_temp.append(top_c)
+		if not is_instance_valid(top_c): continue
+		var tl := MagicRules.get_card_type_line(top_c.card_data).to_lower()
+		var cmc_v := int(float(top_c.card_data.get("cmc", 0.0)))
+		if not ("land" in tl) and cmc_v <= max_cmc:
+			hit_card = top_c
+			break
+	if hit_card != null:
+		exiled_temp.erase(hit_card)
+		if hit_card.has_method("make_active"): hit_card.make_active(hit_card.card_data)
+		if owner_id == local_player_id and hud_manager and hud_manager.has_method("open_choice_popup"):
+			var opts: Array[String] = ["Cast %s for Free" % str(hit_card.card_data.get("name", "Spell")), "Put into Hand" if is_discover else "Put on Bottom"]
+			hud_manager.open_choice_popup("DISCOVER" if is_discover else "CASCADE", opts, func(idx: int):
+				if idx == 0 and is_instance_valid(hit_card):
+					zone_manager.move_to_stack(hit_card)
+				elif is_instance_valid(hit_card):
+					if is_discover: zone_manager.move_to_hand(hit_card)
+					else: zone_manager.move_to_bottom_library(hit_card)
+			)
+		else:
+			zone_manager.move_to_stack(hit_card)
+	exiled_temp.shuffle()
+	for rem_c in exiled_temp:
+		if is_instance_valid(rem_c):
+			zone_manager.move_to_bottom_library(rem_c)
+
+
+func exile_with_alt_mechanic(card_node: Node3D, mode: String, cost_str: String, suspend_n: int = 0) -> void:
+	if not is_instance_valid(card_node): return
+	if not can_pay_and_drain_cost(cost_str, local_player_id): return
+	hand_cards.erase(card_node)
+	zone_manager.update_hand_positions(true)
+	if mode == "foretell":
+		card_node.set_meta("foretold", true)
+		card_node.set_meta("foretold_turn", turn_manager.turn_number)
+	elif mode == "plot":
+		card_node.set_meta("plotted", true)
+		card_node.set_meta("plotted_turn", turn_manager.turn_number)
+	elif mode == "suspend":
+		card_node.set_meta("suspended", true)
+		if card_node.has_method("modify_named_counter") and suspend_n > 0:
+			card_node.modify_named_counter("time", suspend_n)
+	zone_manager.move_to_exile(card_node)
+
+func cast_from_exile(card_node: Node3D, mode: String, alt_cost: String) -> void:
+	if not is_instance_valid(card_node) or not turn_manager.holds_priority(local_player_id): return
+	var is_instant := MagicRules.can_cast_at_instant_speed(card_node.card_data, 0, local_player_id, self)
+	if mode == "plot" or not is_instant:
+		if not turn_manager.can_act_sorcery_speed(local_player_id): return
+	if not alt_cost.is_empty() and not can_pay_and_drain_cost(alt_cost, local_player_id):
+		return
+	card_node.remove_meta("foretold"); card_node.remove_meta("foretold_turn")
+	card_node.remove_meta("plotted"); card_node.remove_meta("plotted_turn")
+	card_node.remove_meta("suspended")
+	exile_stack.erase(card_node)
+	zone_manager.move_to_stack(card_node)
+	zone_manager.update_zone_counters()
+
+func handle_discard_with_madness(card_node: Node3D, owner_id: int) -> void:
+	if not is_instance_valid(card_node): return
+	var pa: Dictionary = card_node.parsed_abilities if "parsed_abilities" in card_node else {}
+	var mad_cost: String = str(pa.get("madness_cost", ""))
+	if mad_cost.is_empty():
+		zone_manager.move_to_graveyard(card_node)
+		return
+	zone_manager.move_to_exile(card_node)
+	if owner_id == local_player_id and hud_manager and hud_manager.has_method("open_choice_popup"):
+		hud_manager.open_choice_popup("MADNESS — %s" % str(card_node.card_data.get("name", "Card")).to_upper(), ["Cast for Madness (%s)" % mad_cost, "Put into Graveyard"], func(idx: int):
+			if not is_instance_valid(card_node): return
+			if idx == 0 and can_pay_and_drain_cost(mad_cost, local_player_id):
+				exile_stack.erase(card_node)
+				zone_manager.move_to_stack(card_node)
+			else:
+				exile_stack.erase(card_node)
+				zone_manager.move_to_graveyard(card_node)
+		)
+	else:
+		if can_pay_and_drain_cost(mad_cost, owner_id):
+			player_exile.get(owner_id, []).erase(card_node)
+			zone_manager.move_to_stack(card_node)
+		else:
+			player_exile.get(owner_id, []).erase(card_node)
+			zone_manager.move_to_graveyard(card_node)
+
+
+func push_undo_snapshot() -> void:
+	if is_network_multiplayer(): return
+	var snap := GameSerializer.serialize_state(self)
+	undo_stack.append(snap)
+	if undo_stack.size() > 20:
+		undo_stack.pop_front()
+
+func undo_last_action() -> bool:
+	if is_network_multiplayer() or undo_stack.is_empty(): return false
+	var snap: Dictionary = undo_stack.pop_back()
+	GameSerializer.restore_state(self, snap)
+	return true
+
+func save_game_to_disk(path: String = SAVE_GAME_PATH) -> bool:
+	var snap := GameSerializer.serialize_state(self)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if not f: return false
+	f.store_string(JSON.stringify(snap))
+	return true
+
+func load_game_from_disk(path: String = SAVE_GAME_PATH) -> bool:
+	if not FileAccess.file_exists(path): return false
+	var f := FileAccess.open(path, FileAccess.READ)
+	if not f: return false
+	var json := JSON.new()
+	if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
+		GameSerializer.restore_state(self, json.get_data())
+		return true
+	return false

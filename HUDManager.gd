@@ -218,6 +218,14 @@ func setup_touch_action_bar() -> void:
 	trk_btn.pressed.connect(func(): toggle_table_trackers())
 	hbox.add_child(trk_btn)
 
+	var undo_t_btn := Button.new()
+	undo_t_btn.text = "↩ Undo"
+	undo_t_btn.custom_minimum_size = Vector2(86, 48)
+	undo_t_btn.pressed.connect(func():
+		if engine.has_method("undo_last_action"): engine.undo_last_action()
+	)
+	hbox.add_child(undo_t_btn)
+
 	var cam_btn := Button.new()
 	cam_btn.text = "📷 Cam"
 	cam_btn.custom_minimum_size = Vector2(82, 48)
@@ -1270,6 +1278,8 @@ func open_token_spawner() -> void:
 	apply_custom_font(token_canvas)
 
 func open_activated_abilities_menu(card_node: Node3D) -> void:
+	var existing_act := engine.get_node_or_null("ActivatedAbilitiesUI")
+	if existing_act: existing_act.queue_free()
 	var abilities: Array = card_node.get_activated_abilities()
 	var loy_abilities: Array = card_node.parsed_abilities.get("loyalty_abilities", [])
 	var can_transform: bool = MagicRules.is_transform(card_node.card_data)
@@ -1396,6 +1406,31 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 				execute_activation.call(null)
 		)
 		vbox.add_child(btn)
+
+	var crew_n: int = int(card_node.parsed_abilities.get("crew_cost", 0)) if "parsed_abilities" in card_node else 0
+	if crew_n > 0:
+		var crew_btn := Button.new()
+		crew_btn.text = "Crew %d (Animate Vehicle)" % crew_n
+		crew_btn.pressed.connect(func():
+			popup.queue_free()
+			var tot_p := 0
+			var tapped_crews: Array[Node3D] = []
+			for cr in engine.battlefield_non_lands:
+				if is_instance_valid(cr) and cr != card_node and not cr.is_tapped and engine.get_card_owner_id(cr) == engine.local_player_id and MagicRules.is_creature(cr.card_data):
+					cr.toggle_tap()
+					tapped_crews.append(cr)
+					tot_p += maxi(0, int(cr.dynamic_power))
+					if tot_p >= crew_n: break
+			if tot_p >= crew_n:
+				card_node.set_meta("crewed_until_eot", true)
+				if "type_overrides" in card_node and not ("Creature" in card_node.type_overrides):
+					card_node.type_overrides.append("Creature")
+				engine.run_state_based_actions()
+			else:
+				for cr in tapped_crews:
+					if is_instance_valid(cr) and cr.is_tapped: cr.toggle_tap()
+		)
+		vbox.add_child(crew_btn)
 
 	if can_transform:
 		var tr_btn := Button.new()
@@ -2328,7 +2363,8 @@ func toggle_settings_menu() -> void:
 	settings_canvas.add_child(center)
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(360, 0)
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	panel.custom_minimum_size = Vector2(minf(600.0, vp_sz.x - 24.0), 0)
 	center.add_child(panel)
 
 	var vbox := VBoxContainer.new()
@@ -2343,9 +2379,16 @@ func toggle_settings_menu() -> void:
 	vbox.add_child(title)
 	vbox.add_child(HSeparator.new())
 
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 10)
+	vbox.add_child(grid)
+
 	var sfx_btn := Button.new()
 	var is_muted: bool = engine.sound_manager != null and bool(engine.sound_manager._muted)
 	sfx_btn.text = "Sound Effects: OFF" if is_muted else "Sound Effects: ON"
+	sfx_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sfx_btn.custom_minimum_size = Vector2(0, 38)
 	sfx_btn.pressed.connect(func():
 		if engine.sound_manager:
@@ -2353,35 +2396,84 @@ func toggle_settings_menu() -> void:
 			engine.sound_manager.set_muted(next_m)
 			sfx_btn.text = "Sound Effects: OFF" if next_m else "Sound Effects: ON"
 	)
-	vbox.add_child(sfx_btn)
+	grid.add_child(sfx_btn)
 
 	var auto_btn := Button.new()
 	auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
+	auto_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	auto_btn.custom_minimum_size = Vector2(0, 38)
 	auto_btn.pressed.connect(func():
 		engine.turn_manager.auto_pass_opponents = not engine.turn_manager.auto_pass_opponents
 		auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
 	)
-	vbox.add_child(auto_btn)
+	grid.add_child(auto_btn)
+
+	var diff_btn := Button.new()
+	var _diff_lbl := func() -> String:
+		var d: int = int(engine.ai_controller.difficulty) if engine.ai_controller else 1
+		return "AI Difficulty: Casual" if d == 0 else ("AI Difficulty: cEDH" if d == 2 else "AI Difficulty: Tuned")
+	diff_btn.text = _diff_lbl.call()
+	diff_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	diff_btn.custom_minimum_size = Vector2(0, 38)
+	diff_btn.pressed.connect(func():
+		if engine.ai_controller:
+			engine.ai_controller.difficulty = (int(engine.ai_controller.difficulty) + 1) % 3
+			diff_btn.text = _diff_lbl.call()
+	)
+	grid.add_child(diff_btn)
 
 	var touch_btn := Button.new()
 	touch_btn.text = "Touch Action Bar: ON" if touch_controls_enabled else "Touch Action Bar: OFF"
+	touch_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	touch_btn.custom_minimum_size = Vector2(0, 42)
 	touch_btn.pressed.connect(func():
 		touch_controls_enabled = not touch_controls_enabled
 		touch_btn.text = "Touch Action Bar: ON" if touch_controls_enabled else "Touch Action Bar: OFF"
 		setup_touch_action_bar()
 	)
-	vbox.add_child(touch_btn)
+	grid.add_child(touch_btn)
 
 	var mp_btn := Button.new()
 	mp_btn.text = "🌐 P2P Multiplayer Lobby"
+	mp_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	mp_btn.custom_minimum_size = Vector2(0, 42)
 	mp_btn.pressed.connect(func():
 		toggle_settings_menu()
 		open_multiplayer_lobby()
 	)
-	vbox.add_child(mp_btn)
+	grid.add_child(mp_btn)
+
+	var undo_btn := Button.new()
+	undo_btn.text = "↩ Undo Last Action"
+	undo_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	undo_btn.custom_minimum_size = Vector2(0, 40)
+	undo_btn.disabled = engine.is_network_multiplayer() or engine.undo_stack.is_empty()
+	undo_btn.pressed.connect(func():
+		toggle_settings_menu()
+		if engine.has_method("undo_last_action"): engine.undo_last_action()
+	)
+	grid.add_child(undo_btn)
+
+	var save_btn := Button.new()
+	save_btn.text = "💾 Save Game"
+	save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	save_btn.custom_minimum_size = Vector2(0, 40)
+	save_btn.pressed.connect(func():
+		if engine.has_method("save_game_to_disk") and engine.save_game_to_disk():
+			save_btn.text = "💾 Saved!"
+	)
+	grid.add_child(save_btn)
+
+	var load_g_btn := Button.new()
+	load_g_btn.text = "📂 Load Saved Game"
+	load_g_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	load_g_btn.custom_minimum_size = Vector2(0, 40)
+	load_g_btn.disabled = not FileAccess.file_exists("user://savegame.json")
+	load_g_btn.pressed.connect(func():
+		toggle_settings_menu()
+		if engine.has_method("load_game_from_disk"): engine.load_game_from_disk()
+	)
+	grid.add_child(load_g_btn)
 
 	var spd_btn := Button.new()
 	var _spd_label := func() -> String:
@@ -2389,6 +2481,7 @@ func toggle_settings_menu() -> void:
 		elif engine.controller_cursor_speed > 1150.0: return "Controller Cursor Speed: Fast"
 		return "Controller Cursor Speed: Normal"
 	spd_btn.text = _spd_label.call()
+	spd_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spd_btn.custom_minimum_size = Vector2(0, 38)
 	spd_btn.pressed.connect(func():
 		if engine.controller_cursor_speed < 750.0: engine.controller_cursor_speed = 950.0
@@ -2396,43 +2489,47 @@ func toggle_settings_menu() -> void:
 		else: engine.controller_cursor_speed = 650.0
 		spd_btn.text = _spd_label.call()
 	)
-	vbox.add_child(spd_btn)
+	grid.add_child(spd_btn)
 
 	var trk_btn := Button.new()
 	trk_btn.text = "Table & Player Trackers"
+	trk_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	trk_btn.custom_minimum_size = Vector2(0, 38)
 	trk_btn.pressed.connect(func():
 		toggle_settings_menu()
 		toggle_table_trackers()
 	)
-	vbox.add_child(trk_btn)
+	grid.add_child(trk_btn)
 
 	var log_btn := Button.new()
 	log_btn.text = "Match Event Log"
+	log_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	log_btn.custom_minimum_size = Vector2(0, 38)
 	log_btn.pressed.connect(func():
 		toggle_settings_menu()
 		toggle_match_log()
 	)
-	vbox.add_child(log_btn)
+	grid.add_child(log_btn)
 
 	var ctrl_btn := Button.new()
 	ctrl_btn.text = "Xbox Controller Guide"
+	ctrl_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	ctrl_btn.custom_minimum_size = Vector2(0, 38)
 	ctrl_btn.pressed.connect(func():
 		toggle_settings_menu()
 		toggle_controller_help()
 	)
-	vbox.add_child(ctrl_btn)
+	grid.add_child(ctrl_btn)
 
 	var reset_btn := Button.new()
 	reset_btn.text = "New Game / Reselect Decks"
+	reset_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	reset_btn.custom_minimum_size = Vector2(0, 38)
 	reset_btn.pressed.connect(func():
 		toggle_settings_menu()
 		engine.reset_game_and_reselect_decks()
 	)
-	vbox.add_child(reset_btn)
+	grid.add_child(reset_btn)
 
 	var close_btn := Button.new()
 	close_btn.text = "Close"
@@ -2839,3 +2936,66 @@ func open_multiplayer_lobby() -> void:
 	btn_row.add_child(close_btn)
 
 	apply_custom_font(lobby_canvas)
+
+
+func open_trigger_order_popup(trigs: Array, callback: Callable) -> void:
+	var popup := CanvasLayer.new()
+	popup.layer = 110
+	engine.add_child(popup)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(400, 0)
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "ORDER SIMULTANEOUS TRIGGERS (1ST = RESOLVES LAST)"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 13)
+	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
+	vbox.add_child(title)
+
+	var ordered := []
+	var remaining := trigs.duplicate()
+
+	var list_box := VBoxContainer.new()
+	list_box.add_theme_constant_override("separation", 6)
+	vbox.add_child(list_box)
+
+	var rebuild := [Callable()]
+	rebuild[0] = func():
+		for ch in list_box.get_children(): ch.queue_free()
+		for idx in range(remaining.size()):
+			var item: Dictionary = remaining[idx]
+			var p_name := str(item["perm"].card_data.get("name", "Card")) if is_instance_valid(item["perm"]) else "Card"
+			var eff := str(item["trig"].get("effect_raw", "")).left(42)
+			var b := Button.new()
+			b.text = "Stack Next: %s — %s" % [p_name, eff]
+			b.pressed.connect(func():
+				ordered.append(item)
+				remaining.remove_at(idx)
+				if remaining.is_empty():
+					popup.queue_free()
+					if callback.is_valid(): callback.call(ordered)
+				else:
+					rebuild[0].call()
+			)
+			list_box.add_child(b)
+	rebuild[0].call()
+
+	var auto_b := Button.new()
+	auto_b.text = "Auto-Order Remaining"
+	auto_b.pressed.connect(func():
+		ordered.append_array(remaining)
+		popup.queue_free()
+		if callback.is_valid(): callback.call(ordered)
+	)
+	vbox.add_child(auto_b)
+	apply_custom_font(popup)

@@ -95,7 +95,20 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 		"saga_chapters": [],
 		"saga_max_chapter": 0,
 		"ward_cost": "",
-		"protection_from": []
+		"protection_from": [],
+		"hexproof_from": [],
+		"crew_cost": 0,
+		"saddle_cost": 0,
+		"foretell_cost": "",
+		"has_storm": false,
+		"has_split_second": false,
+		"has_cascade": false,
+		"discover_n": 0,
+		"plot_cost": "",
+		"madness_cost": "",
+		"suspend_count": 0,
+		"suspend_cost": "",
+		"companion_text": ""
 	}
 
 	if oracle_text.is_empty():
@@ -216,6 +229,60 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 			parsed_data["ward_cost"] = ward_m.get_string(1).strip_edges().to_upper()
 			if not ("ward" in parsed_data["keywords"]):
 				parsed_data["keywords"].append("ward")
+		var crew_rx := RegEx.new()
+		crew_rx.compile("^Crew\\s+(\\d+)")
+		var cm := crew_rx.search(clean_line)
+		if cm: parsed_data["crew_cost"] = cm.get_string(1).to_int()
+
+		var saddle_rx := RegEx.new()
+		saddle_rx.compile("^Saddle\\s+(\\d+)")
+		var sm := saddle_rx.search(clean_line)
+		if sm: parsed_data["saddle_cost"] = sm.get_string(1).to_int()
+
+		var plot_rx := RegEx.new()
+		plot_rx.compile("^Plot\\s+((?:\\{[^\\}]+\\})+)")
+		var plm := plot_rx.search(clean_line)
+		if plm: parsed_data["plot_cost"] = plm.get_string(1)
+
+		var mad_rx := RegEx.new()
+		mad_rx.compile("^Madness\\s+((?:\\{[^\\}]+\\})+)")
+		var mm := mad_rx.search(clean_line)
+		if mm: parsed_data["madness_cost"] = mm.get_string(1)
+
+		var susp_rx := RegEx.new()
+		susp_rx.compile("^Suspend\\s+(\\d+)[\\s—-]+((?:\\{[^\\}]+\\})+)")
+		var spm := susp_rx.search(clean_line)
+		if spm:
+			parsed_data["suspend_count"] = spm.get_string(1).to_int()
+			parsed_data["suspend_cost"] = spm.get_string(2)
+
+		if line_lower.begins_with("companion —") or line_lower.begins_with("companion -"):
+			parsed_data["companion_text"] = clean_line
+
+		var foretell_rx := RegEx.new()
+		foretell_rx.compile("^Foretell\\s+((?:\\{[^\\}]+\\})+)")
+		var fm := foretell_rx.search(clean_line)
+		if fm: parsed_data["foretell_cost"] = fm.get_string(1)
+
+		var disc_rx := RegEx.new()
+		disc_rx.compile("(?i)discover\\s+(\\d+)")
+		var dm := disc_rx.search(clean_line)
+		if dm: parsed_data["discover_n"] = dm.get_string(1).to_int()
+
+		var hf_rx := RegEx.new()
+		hf_rx.compile("(?i)hexproof from ([a-zA-Z]+)")
+		for hfm in hf_rx.search_all(clean_line):
+			var h_val := hfm.get_string(1).strip_edges().to_lower()
+			if not h_val.is_empty() and not (h_val in parsed_data["hexproof_from"]):
+				parsed_data["hexproof_from"].append(h_val)
+
+		if line_lower == "storm" or "storm" in line_lower.split(","):
+			parsed_data["has_storm"] = true
+		if line_lower == "split second":
+			parsed_data["has_split_second"] = true
+		if line_lower == "cascade":
+			parsed_data["has_cascade"] = true
+
 		var prot_m := PROT_REGEX.search(line_lower)
 		if prot_m:
 			var p_raw := prot_m.get_string(1).strip_edges()
@@ -467,6 +534,18 @@ static func parse_mana_abilities(card_data: Dictionary, card_node: Node = null) 
 			elif "planeswalker" in eff_lower:
 				restriction = "planeswalker"
 				restriction_text = "Only for Planeswalker spells"
+			elif "legendary" in eff_lower:
+				restriction = "legendary"
+				restriction_text = "Only for Legendary spells"
+			elif "multicolored" in eff_lower:
+				restriction = "multicolored"
+				restriction_text = "Only for Multicolored spells"
+		elif "can't be spent to cast a nonartifact spell" in eff_lower:
+			restriction = "non_nonartifact"
+			restriction_text = "Not for Nonartifact spells"
+		elif "can't be spent to cast a creature spell" in eff_lower:
+			restriction = "non_creature"
+			restriction_text = "Not for Creature spells"
 		elif "spend this mana only to activate" in eff_lower or "only on activated abilities" in eff_lower:
 			restriction = "activated"
 			restriction_text = "Only for Activated abilities"

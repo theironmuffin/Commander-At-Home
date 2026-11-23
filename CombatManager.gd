@@ -200,8 +200,13 @@ func _execute_combat_damage_pass(blockers_by_attacker: Dictionary, first_strike_
 
 func _deal_combat_damage_to_creature(source: Node3D, target: Node3D, amount: int) -> void:
 	if amount <= 0: return
-	if MagicRules.has_protection_from(target, source): return
-	target.marked_damage += amount
+	if MagicRules.has_protection_from(target, source) and not MagicRules.is_damage_unpreventable(source, engine): return
+	var src_ol := str(MagicRules.get_card_attribute(source.card_data, "oracle_text", "")).to_lower()
+	if (source.has_method("has_keyword") and (bool(source.has_keyword("infect")) or bool(source.has_keyword("wither")))) or "infect" in src_ol or "wither" in src_ol:
+		if target.has_method("modify_counters"):
+			target.modify_counters(-amount)
+	else:
+		target.marked_damage += amount
 	if source.has_method("has_keyword") and bool(source.has_keyword("deathtouch")):
 		target.has_deathtouch_damage = true
 	target.refresh_visual_status()
@@ -219,10 +224,23 @@ func _deal_combat_damage_to_planeswalker(source: Node3D, pw: Node3D, amount: int
 
 func _deal_combat_damage_to_player(source: Node3D, target_pid: int, amount: int) -> void:
 	if amount <= 0 or target_pid <= 0 or target_pid == engine.get_card_owner_id(source): return
-	engine.modify_life(target_pid, -amount)
+	var src_ol := str(MagicRules.get_card_attribute(source.card_data, "oracle_text", "")).to_lower()
+	var has_infect := (source.has_method("has_keyword") and bool(source.has_keyword("infect"))) or "infect" in src_ol
+	if has_infect:
+		engine.modify_player_counter(target_pid, "poison", amount)
+	else:
+		engine.modify_life(target_pid, -amount)
+		var tox_rx := RegEx.new()
+		tox_rx.compile("toxic\\s+(\\d+)")
+		var tm := tox_rx.search(src_ol)
+		if tm:
+			engine.modify_player_counter(target_pid, "poison", tm.get_string(1).to_int())
 	EventBus.damage_dealt.emit(source, target_pid, amount)
+	var atk_owner: int = engine.get_card_owner_id(source)
 	if engine.monarch_player_id == target_pid:
-		engine.set_monarch(engine.get_card_owner_id(source))
+		engine.set_monarch(atk_owner)
+	if engine.initiative_player_id == target_pid:
+		engine.set_initiative(atk_owner)
 	var is_cmd: bool = (source.has_meta("is_commander") and bool(source.get_meta("is_commander"))) or (source in engine.command_zone_cards)
 	if is_cmd:
 		if not engine.commander_damage.has(target_pid):

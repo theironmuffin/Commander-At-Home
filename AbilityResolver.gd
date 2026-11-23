@@ -127,6 +127,8 @@ static func _split_clauses(text: String) -> Array[String]:
 	var out: Array[String] = []
 	var normalized := text.replace("\n", ". ").replace(";", ".").replace(", then ", ". ").replace(". Then ", ". ")
 	for comma_verb in [", scry ", ", surveil ", ", draw ", ", you gain ", ", gain ", ", you lose ", ", lose ", ", discard ", ", mill ", ", create ", ", destroy ", ", exile ", ", return ", ", put ", ", tap ", ", untap "]:
+		if comma_verb == ", put " and "search your library" in normalized.to_lower():
+			continue
 		normalized = normalized.replace(comma_verb, ". " + comma_verb.substr(2))
 	for raw_sent in normalized.split("."):
 		var s := raw_sent.strip_edges()
@@ -168,6 +170,19 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 	if "take the initiative" in c:
 		if engine: engine.set_initiative(owner_id)
 		return
+	if "venture into the dungeon" in c:
+		if engine and engine.has_method("advance_dungeon_for_player"):
+			engine.advance_dungeon_for_player(owner_id, "Lost Mine of Phandelver")
+		return
+	if "the ring tempts you" in c:
+		if engine:
+			engine.modify_player_counter(owner_id, "ring", 1)
+			for p in engine.battlefield_non_lands:
+				if is_instance_valid(p) and engine.get_card_owner_id(p) == owner_id and MagicRules.is_creature(p.card_data):
+					if p.has_method("set_custom_status"):
+						p.set_custom_status("Ring-bearer", true)
+						break
+		return
 	if "becomes day" in c:
 		if engine: engine.set_day_night("Day")
 		return
@@ -179,6 +194,13 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		var amt := _extract_number(c, "get ") if "get " in c else _extract_number(c, "gets ")
 		for pid in _resolve_affected_players(c, engine, owner_id, target):
 			if engine: engine.modify_player_counter(pid, p_key, amt)
+		return
+	if "copy target" in c and "spell" in c:
+		_handle_copy_spell(target, engine, owner_id); return
+	if "discover " in c:
+		var d_val := _extract_number(c, "discover ")
+		if engine and engine.has_method("trigger_cascade_or_discover"):
+			engine.trigger_cascade_or_discover(owner_id, d_val, true)
 		return
 	if "counter target" in c or c.begins_with("counter "):
 		_handle_counter_spell(target, engine); return
@@ -355,7 +377,7 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 				hand_arr.erase(best_card)
 				if best_card.has_method("make_active"): best_card.make_active(best_card.card_data)
 				engine.zone_manager.update_opponent_hand_positions(pid, true)
-				engine._on_card_to_graveyard(best_card)
+				engine.handle_discard_with_madness(best_card, pid) if engine.has_method("handle_discard_with_madness") else engine._on_card_to_graveyard(best_card)
 
 static func _apply_noncombat_damage_modifiers(base_amount: int, source_controller_id: int, target_owner_id: int, target_is_permanent: bool, engine: Node) -> int:
 	if base_amount <= 0 or engine == null:
@@ -417,7 +439,7 @@ static func _handle_damage(c: String, source: Node3D, target: Variant, engine: N
 		var t_node := target as Node3D
 		var tgt_owner: int = engine.get_card_owner_id(t_node) if engine else -1
 		var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_owner, true, engine)
-		if MagicRules.has_protection_from(t_node, source):
+		if MagicRules.has_protection_from(t_node, source) and not MagicRules.is_damage_unpreventable(source, engine):
 			pass
 		elif MagicRules.is_planeswalker(t_node.card_data):
 			if t_node.has_method("modify_named_counter"):
@@ -740,6 +762,8 @@ static func _handle_sacrifice(c: String, target: Variant, engine: Node, owner_id
 
 static func _handle_counter_spell(target: Variant, engine: Node) -> void:
 	if not engine or target == null: return
+	if target is Node3D and MagicRules.is_spell_uncounterable(target as Node3D, engine):
+		return
 	if target in engine.active_stack:
 		engine.active_stack.erase(target)
 		EventBus.play_sfx("fizzle")
@@ -826,3 +850,18 @@ static func _handle_library_search(c: String, engine: Node, owner_id: int) -> vo
 		else:
 			engine._on_tutor_card_selected(chosen_card)
 	)
+
+
+static func _handle_copy_spell(target: Variant, engine: Node, _owner_id: int) -> void:
+	if not engine or target == null: return
+	if target is Node3D and is_instance_valid(target):
+		var t_node := target as Node3D
+		var face_idx: int = int(t_node.get("active_face_index")) if "active_face_index" in t_node else 0
+		var eff := str(MagicRules.get_card_attribute(t_node.card_data, "oracle_text", "", face_idx))
+		var copy_obj := {
+			"effect_raw": eff,
+			"target_requirement": str(t_node.get_meta("target_requirement")) if t_node.has_meta("target_requirement") else ""
+		}
+		if engine.has_method("_finalize_push_ability_to_stack"):
+			var tgt_ref: Variant = t_node.get_meta("chosen_target") if t_node.has_meta("chosen_target") else null
+			engine._finalize_push_ability_to_stack(t_node, copy_obj, "Spell Copy", tgt_ref)
