@@ -14,6 +14,7 @@ var enet_peer: ENetMultiplayerPeer = null
 var peer_to_seat: Dictionary = {} # peer_id (int) -> seat_id (1..4)
 var seat_to_peer: Dictionary = {} # seat_id (1..4) -> peer_id (int)
 var seat_decks: Dictionary = {}   # seat_id (1..4) -> Dictionary {deckName, commander, cards}
+var seat_cosmetics: Dictionary = {} # seat_id (1..4) -> {sleeve_bytes, playmat_bytes}
 var seat_names: Dictionary = {}   # seat_id (1..4) -> String
 var is_hosting: bool = false
 var is_in_lobby: bool = false
@@ -111,6 +112,7 @@ func disconnect_game() -> void:
 	peer_to_seat.clear()
 	seat_to_peer.clear()
 	seat_decks.clear()
+	seat_cosmetics.clear()
 	seat_names.clear()
 	var mp := get_tree().get_multiplayer()
 	if mp and mp.has_multiplayer_peer():
@@ -182,6 +184,27 @@ func submit_local_deck(deck_payload: Dictionary) -> void:
 @rpc("any_peer", "call_local", "reliable")
 func _rpc_submit_deck(seat_id: int, deck_payload: Dictionary) -> void:
 	seat_decks[seat_id] = deck_payload
+	lobby_updated.emit()
+
+func _encode_image_bytes(file_path: String) -> PackedByteArray:
+	if file_path.is_empty() or not FileAccess.file_exists(file_path):
+		return PackedByteArray()
+	var img := Image.load_from_file(file_path)
+	if not img or img.is_empty():
+		return PackedByteArray()
+	if img.get_width() > 512 or img.get_height() > 512:
+		img.resize(mini(img.get_width(), 512), mini(img.get_height(), 512), Image.INTERPOLATE_BILINEAR)
+	return img.save_jpg_to_buffer(0.82)
+
+func submit_local_cosmetics(sleeve_path: String, playmat_path: String) -> void:
+	if not is_network_active():
+		return
+	var my_seat := get_local_seat_id()
+	_rpc_submit_cosmetics.rpc(my_seat, _encode_image_bytes(sleeve_path), _encode_image_bytes(playmat_path))
+
+@rpc("any_peer", "call_local", "reliable")
+func _rpc_submit_cosmetics(seat_id: int, sleeve_bytes: PackedByteArray, playmat_bytes: PackedByteArray) -> void:
+	seat_cosmetics[seat_id] = {"sleeve_bytes": sleeve_bytes, "playmat_bytes": playmat_bytes}
 	lobby_updated.emit()
 
 func host_start_network_match(starting_pid: int, all_seat_decks: Dictionary) -> void:

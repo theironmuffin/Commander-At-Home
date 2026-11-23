@@ -152,19 +152,8 @@ func update_battlefield_positions(animated: bool = false) -> void:
 	if animated and engine.battlefield_lands.is_empty() and engine.battlefield_non_lands.is_empty(): return
 	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT) if animated else null
 
-	# Player 1 (Local) — untouched
-	var p1_lands: Array[Node3D] = []
-	var p1_non_lands: Array[Node3D] = []
-	for c in engine.battlefield_lands:
-		if is_instance_valid(c) and engine.get_card_controller_id(c) == engine.local_player_id: p1_lands.append(c)
-	for c in engine.battlefield_non_lands:
-		if is_instance_valid(c) and engine.get_card_controller_id(c) == engine.local_player_id: p1_non_lands.append(c)
-
-	_arrange_cards_in_row(p1_lands, engine.battlefield_lands_spacing_x, engine.battlefield_lands_y, engine.battlefield_lands_z, animated, tween)
-	_arrange_cards_in_row(p1_non_lands, engine.battlefield_non_lands_spacing_x, engine.battlefield_non_lands_y, engine.battlefield_non_lands_z, animated, tween)
-
-	# Players 2-4 — arranged in their station anchors
-	for pid in [2, 3, 4]:
+	# Arrange all 4 seats in their respective station anchors so every player sees every board in its true seat
+	for pid in [1, 2, 3, 4]:
 		if not engine.player_stations.has(pid): continue
 		var st: Dictionary = engine.player_stations[pid]
 		var lands_anc: Node3D = st["lands_anchor"]
@@ -172,9 +161,19 @@ func update_battlefield_positions(animated: bool = false) -> void:
 		var opp_lands: Array[Node3D] = []
 		var opp_non_lands: Array[Node3D] = []
 		for c in engine.battlefield_lands:
-			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid: opp_lands.append(c)
+			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid:
+				if c.get_parent() != lands_anc:
+					var gt_l: Transform3D = c.global_transform
+					c.reparent(lands_anc, true)
+					c.global_transform = gt_l
+				opp_lands.append(c)
 		for c in engine.battlefield_non_lands:
-			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid: opp_non_lands.append(c)
+			if is_instance_valid(c) and engine.get_card_controller_id(c) == pid:
+				if c.get_parent() != non_lands_anc:
+					var gt_n: Transform3D = c.global_transform
+					c.reparent(non_lands_anc, true)
+					c.global_transform = gt_n
+				opp_non_lands.append(c)
 		if not opp_lands.is_empty() and lands_anc:
 			_arrange_cards_in_row(opp_lands, engine.battlefield_lands_spacing_x, 0.0, 0.0, animated, tween, lands_anc)
 		if not opp_non_lands.is_empty() and non_lands_anc:

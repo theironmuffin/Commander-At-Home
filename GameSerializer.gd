@@ -61,6 +61,10 @@ static func serialize_state(engine: Node) -> Dictionary:
 	for i in range(engine.battlefield_non_lands.size()):
 		if is_instance_valid(engine.battlefield_non_lands[i]):
 			cards_out.append(_serialize_card(engine.battlefield_non_lands[i], "battlefield_non_land", i, engine))
+	for i in range(engine.active_stack.size()):
+		var s_it = engine.active_stack[i]
+		if s_it is Node3D and is_instance_valid(s_it):
+			cards_out.append(_serialize_card(s_it, "stack", i, engine))
 
 	return {
 		"version": 1,
@@ -135,12 +139,13 @@ static func restore_state(engine: Node, state: Dictionary) -> void:
 	for k_raw in state.get("player_dungeons", {}).keys():
 		engine.player_dungeons[int(k_raw)] = state["player_dungeons"][k_raw].duplicate(true)
 
-	var mp: Dictionary = state.get("mana_pool", {})
-	for c_k in engine.mana_pool.keys():
-		engine.mana_pool[c_k] = int(mp.get(c_k, 0))
-	engine.restricted_mana.clear()
-	for rm in state.get("restricted_mana", []):
-		if rm is Dictionary: engine.restricted_mana.append(rm.duplicate(true))
+	if int(state.get("local_player_id", engine.local_player_id)) == engine.local_player_id:
+		var mp: Dictionary = state.get("mana_pool", {})
+		for c_k in engine.mana_pool.keys():
+			engine.mana_pool[c_k] = int(mp.get(c_k, 0))
+		engine.restricted_mana.clear()
+		for rm in state.get("restricted_mana", []):
+			if rm is Dictionary: engine.restricted_mana.append(rm.duplicate(true))
 
 	var tm: Node = engine.turn_manager
 	tm.turn_number = int(state.get("turn_number", 1))
@@ -209,9 +214,13 @@ static func restore_state(engine: Node, state: Dictionary) -> void:
 				if card.has_method("make_active"): card.make_active(card.card_data)
 				if is_local: engine.command_zone_cards.append(card)
 				engine.player_command_zones[owner_id].append(card)
+			"stack":
+				engine.central_stack_anchor.add_child(card)
+				if card.has_method("make_active"): card.make_active(card.card_data)
+				engine.active_stack.append(card)
 			"battlefield_land", "battlefield_non_land":
 				var is_land := (zone == "battlefield_land")
-				var p_anc: Node3D = engine if ctrl_id == engine.local_player_id else engine.player_stations[ctrl_id]["lands_anchor" if is_land else "non_lands_anchor"]
+				var p_anc: Node3D = engine.player_stations[ctrl_id]["lands_anchor" if is_land else "non_lands_anchor"] if engine.player_stations.has(ctrl_id) else engine
 				p_anc.add_child(card)
 				if card.has_method("make_active"): card.make_active(card.card_data)
 				card.is_on_battlefield = true
@@ -231,8 +240,9 @@ static func restore_state(engine: Node, state: Dictionary) -> void:
 		if card.has_method("refresh_visual_status"): card.refresh_visual_status()
 
 	engine.zone_manager.update_hand_positions(false)
-	for pid in [2, 3, 4]:
-		engine.zone_manager.update_opponent_hand_positions(pid, false)
+	for pid in [1, 2, 3, 4]:
+		if pid != engine.local_player_id:
+			engine.zone_manager.update_opponent_hand_positions(pid, false)
 	engine.zone_manager.update_battlefield_positions(false)
 	engine.zone_manager.update_zone_counters()
 	engine.zone_manager.update_commander_tax_counter()

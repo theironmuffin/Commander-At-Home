@@ -75,6 +75,8 @@ func set_starting_player(pid: int) -> void:
 	turn_number = 1
 	EventBus.notify_turn(active_player_id, turn_number)
 	EventBus.notify_phase(current_turn_phase)
+	if engine.is_network_multiplayer() and engine.network_manager.is_hosting and engine.has_method("sync_network_state"):
+		engine.sync_network_state()
 
 
 func has_local_player_interaction() -> bool:
@@ -112,7 +114,7 @@ func _schedule_paced_auto_pass() -> void:
 		if engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open(): return
 		if priority_player_id == engine.local_player_id and not has_local_player_interaction():
 			pass_priority()
-		elif auto_pass_opponents and not engine.is_human_seat(priority_player_id) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
+		elif auto_pass_opponents and not engine.is_human_seat(priority_player_id) and (not engine.is_network_multiplayer() or engine.network_manager.is_hosting) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
 			pass_priority()
 	)
 
@@ -147,8 +149,9 @@ func get_active_player_count() -> int:
 	return maxi(1, cnt)
 
 func pass_priority(from_network: bool = false) -> void:
-	if not from_network and engine.is_network_multiplayer() and priority_player_id == engine.local_player_id:
-		engine.network_manager.dispatch_game_action("PASS_PRIORITY", {})
+	if not from_network and engine.is_network_multiplayer():
+		if priority_player_id == engine.local_player_id or engine.network_manager.is_hosting:
+			engine.network_manager.dispatch_game_action("PASS_PRIORITY", {})
 	priority_passes_count += 1
 	engine.event_ledger.log_event(GameEventLedger.EventType.PRIORITY_PASSED, {
 		"passed_by": priority_player_id,

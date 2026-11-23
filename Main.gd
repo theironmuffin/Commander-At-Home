@@ -1166,7 +1166,7 @@ func setup_tabletop_layout() -> void:
 	central_stack_anchor = _create_anchor("CentralStack", Vector3(0.0, 0.55, 0.0))
 	_setup_command_info_stations()
 	var configs := [
-		{"id": 1, "station_pos": Vector3(0.0, 0.0, 5.5), "rotation_y": 0.0, "lib": Vector3(-3.85, 0.01, 4.0), "gy": Vector3(-3.85, 0.01, 5.0), "cmd": Vector3(-2.75, 0.01, 2.65), "hand_pos": Vector3(0.0, -1.0, 6.8)},
+		{"id": 1, "station_pos": Vector3(0.0, 0.0, 5.5), "rotation_y": 0.0, "lib": Vector3(-3.85, 0.01, -1.5), "gy": Vector3(-3.85, 0.01, -0.3), "cmd": Vector3(-2.75, 0.01, -2.85), "hand_pos": Vector3(0.0, -1.0, 1.3)},
 		{"id": 2, "station_pos": Vector3(5.5, 0.0, 0.0), "rotation_y": -PI / 2.0, "lib": Vector3(-3.85, 0.01, 9.6), "gy": Vector3(-3.85, 0.01, 10.6), "cmd": Vector3(-2.75, 0.01, 8.15), "hand_pos": Vector3(6.8, -1.0, 0.0)},
 		{"id": 3, "station_pos": Vector3(0.0, 0.0, -5.5), "rotation_y": PI, "lib": Vector3(-3.85, 0.01, -1.4), "gy": Vector3(-3.85, 0.01, -0.4), "cmd": Vector3(-2.75, 0.01, -2.85), "hand_pos": Vector3(0.0, -1.0, -6.8)},
 		{"id": 4, "station_pos": Vector3(-5.5, 0.0, 0.0), "rotation_y": PI / 2.0, "lib": Vector3(-3.85, 0.01, 9.6), "gy": Vector3(-3.85, 0.01, 10.6), "cmd": Vector3(-2.75, 0.01, 8.15), "hand_pos": Vector3(-6.8, -1.0, 0.0)}
@@ -1728,7 +1728,8 @@ func resolve_top_stack_card() -> void:
 			return
 
 		var global_trans := card_node.global_transform
-		card_node.reparent(self, true)
+		var l_anc: Node3D = player_stations[local_player_id]["lands_anchor"] if player_stations.has(local_player_id) else self
+		card_node.reparent(l_anc, true)
 		card_node.global_transform = global_trans
 		card_node.is_on_battlefield = true
 		var face_lower := oracle_text.to_lower()
@@ -1769,6 +1770,7 @@ func resolve_top_stack_card() -> void:
 		zone_manager.update_battlefield_positions(true)
 
 	EventBus.play_sfx("resolve")
+	sync_network_state()
 	event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": card_node.card_data.get("name", "")})
 	run_state_based_actions()
 
@@ -2104,6 +2106,7 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 		hud_manager.show_mana_ability_popup(card_node, mana_abilities)
 	else:
 		card_node.toggle_tap()
+		sync_network_state()
 
 
 func start_mulligan_phase() -> void:
@@ -2142,6 +2145,7 @@ func finish_mulligan_phase() -> void:
 		hud_manager.set_game_setup_complete(true)
 	turn_manager.set_starting_player(starting_player_id)
 	turn_manager.advance_turn_phase(false)
+	sync_network_state()
 
 func _on_card_played(card_node: Node3D) -> void:
 	if not is_network_multiplayer() and not (card_node in active_stack): push_undo_snapshot()
@@ -2434,6 +2438,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 		check_and_queue_triggers("ETB", card_node)
 		zone_manager.update_battlefield_positions(true)
 		run_state_based_actions()
+		sync_network_state()
 	else:
 		if has_split_second_on_stack(): return
 		if not is_instant and not turn_manager.can_act_sorcery_speed(local_player_id): return
@@ -3315,11 +3320,76 @@ func is_human_seat(pid: int) -> bool:
 		return network_manager.is_seat_human(pid)
 	return pid == local_player_id
 
+func set_player_sleeve_bytes(pid: int, jpg_bytes: PackedByteArray) -> void:
+	if jpg_bytes.is_empty(): return
+	var img := Image.new()
+	if img.load_jpg_from_buffer(jpg_bytes) == OK:
+		player_sleeve_textures[pid] = ImageTexture.create_from_image(img)
+
+func set_player_playmat_bytes(pid: int, jpg_bytes: PackedByteArray) -> void:
+	if jpg_bytes.is_empty(): return
+	var img := Image.new()
+	if img.load_jpg_from_buffer(jpg_bytes) == OK:
+		var tex := ImageTexture.create_from_image(img)
+		if player_playmat_meshes.has(pid) and is_instance_valid(player_playmat_meshes[pid]):
+			var mi: MeshInstance3D = player_playmat_meshes[pid]
+			var top_art: MeshInstance3D = mi.get_node_or_null("TopArt")
+			var target_mi: MeshInstance3D = top_art if top_art != null else mi
+			target_mi.set_surface_override_material(0, _create_playmat_art_material(tex))
+
+func move_local_camera_to_seat(pid: int) -> void:
+	var cam := get_node_or_null("Camera3D") as CameraControls
+	if not player_stations.has(pid) or not cam: return
+	var st: Dictionary = player_stations[pid]
+	var cfg: Dictionary = st.get("config", {})
+	var st_node: Node3D = st.get("station", null)
+	if not st_node: return
+	var ry: float = float(cfg.get("rotation_y", 0.0))
+	var gy_v: Vector3 = cfg.get("gy", Vector3(-3.85, 0.01, -0.3))
+	var cam_local := Vector3(0.0, 3.0, gy_v.z + 1.8)
+	var cam_world: Vector3 = st_node.global_position + cam_local.rotated(Vector3.UP, ry)
+	if pid == 1:
+		cam_world = Vector3(0.0, 3.0, 7.0)
+	var pitch_rad: float = deg_to_rad(cam.home_pitch_degrees)
+	cam.home_position = cam_world
+	cam.home_rotation = Vector3(pitch_rad, ry, 0.0)
+	cam.position = cam_world
+	cam.rotation = cam.home_rotation
+	cam.target_y = cam_world.y
+	library_anchor = st["library"]
+	graveyard_anchor = st["graveyard"]
+	command_zone_anchor = st["command_zone"]
+	exile_anchor = st["exile"]
+
 func _on_network_match_start(_seed_val: int, starting_pid: int, seat_decks: Dictionary) -> void:
 	starting_player_id = starting_pid
 	local_player_id = network_manager.get_local_seat_id()
+	move_local_camera_to_seat(local_player_id)
+	var ds := get_node_or_null("DeckSelectorUI")
+	if ds and is_instance_valid(ds): ds.queue_free()
+	if hud_manager and hud_manager.lobby_canvas and is_instance_valid(hud_manager.lobby_canvas):
+		hud_manager.lobby_canvas.queue_free()
+		hud_manager.lobby_canvas = null
+	for s_id in network_manager.seat_cosmetics.keys():
+		var cos_d: Dictionary = network_manager.seat_cosmetics[s_id]
+		set_player_sleeve_bytes(int(s_id), cos_d.get("sleeve_bytes", PackedByteArray()))
+		set_player_playmat_bytes(int(s_id), cos_d.get("playmat_bytes", PackedByteArray()))
 	if deck_loader and deck_loader.has_method("load_and_spawn_network_decks"):
 		deck_loader.load_and_spawn_network_decks(seat_decks)
+
+var _net_sync_queued: bool = false
+
+func sync_network_state() -> void:
+	if not is_network_multiplayer() or _net_sync_queued:
+		return
+	_net_sync_queued = true
+	call_deferred("_do_sync_network_state")
+
+func _do_sync_network_state() -> void:
+	_net_sync_queued = false
+	if not is_network_multiplayer(): return
+	var snap := GameSerializer.serialize_state(self)
+	network_manager.dispatch_game_action("STATE_RESYNC", snap)
 
 func _on_network_action_received(sender_seat: int, action_type: String, payload: Dictionary) -> void:
 	match action_type:

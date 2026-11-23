@@ -3044,8 +3044,9 @@ func open_multiplayer_lobby() -> void:
 		if not is_instance_valid(seats_lbl) or not nm: return
 		var parts: Array[String] = []
 		for s in [1, 2, 3, 4]:
+			var d_ready: String = (" — Deck: " + str(nm.seat_decks[s].get("deckName", "Ready"))) if nm.seat_decks.has(s) else " — (Selecting Deck...)"
 			if nm.seat_to_peer.has(s):
-				parts.append("Seat %d: %s" % [s, str(nm.seat_names.get(s, "Human"))])
+				parts.append("Seat %d: %s%s" % [s, str(nm.seat_names.get(s, "Human")), d_ready])
 			else:
 				parts.append("Seat %d: AI Bot" % s)
 		seats_lbl.text = "\n".join(parts)
@@ -3091,6 +3092,113 @@ func open_multiplayer_lobby() -> void:
 		if nm: nm.join_game(ip_in.text, int(port_in.text) if port_in.text.is_valid_int() else NetworkManager.DEFAULT_PORT)
 	)
 	join_row.add_child(join_btn)
+
+	vbox.add_child(HSeparator.new())
+	var deck_row := HBoxContainer.new()
+	deck_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(deck_row)
+	var my_deck_opt := OptionButton.new()
+	my_deck_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	my_deck_opt.custom_minimum_size = Vector2(0, 38)
+	var cached_decks: Dictionary = engine.deck_loader._load_deck_cache() if engine.deck_loader else {}
+	for dk in cached_decks.keys():
+		my_deck_opt.add_item(str(cached_decks[dk].get("deckName", str(dk))))
+		my_deck_opt.set_item_metadata(my_deck_opt.get_item_count() - 1, dk)
+	deck_row.add_child(my_deck_opt)
+
+	var submit_deck_btn := Button.new()
+	submit_deck_btn.text = "Ready / Sync Deck & Mat"
+	submit_deck_btn.custom_minimum_size = Vector2(180, 38)
+	submit_deck_btn.pressed.connect(func():
+		if not nm or not nm.is_network_active():
+			show_toast("Connect or Host first!")
+			return
+		if my_deck_opt.get_item_count() > 0 and my_deck_opt.selected >= 0:
+			var sel_k = my_deck_opt.get_item_metadata(my_deck_opt.selected)
+			if cached_decks.has(sel_k):
+				nm.submit_local_deck(cached_decks[sel_k])
+		var my_seat: int = nm.get_local_seat_id()
+		var slv_p := str(engine.player_sleeves.get(my_seat, engine.player_sleeves.get(1, "")))
+		var mat_p := str(engine.player_playmats.get(my_seat, engine.player_playmats.get(1, "")))
+		nm.submit_local_cosmetics(slv_p, mat_p)
+		submit_deck_btn.text = "Synced!"
+	)
+	deck_row.add_child(submit_deck_btn)
+
+	var cos_row := HBoxContainer.new()
+	cos_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(cos_row)
+
+	var mp_slv_btn := Button.new()
+	mp_slv_btn.text = "🃏 Choose Sleeve..."
+	mp_slv_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mp_slv_btn.custom_minimum_size = Vector2(0, 36)
+	mp_slv_btn.pressed.connect(func():
+		if OS.get_name() == "Android": OS.request_permissions()
+		var fd := FileDialog.new()
+		fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+		fd.access = FileDialog.ACCESS_FILESYSTEM
+		fd.use_native_dialog = true
+		fd.title = "Select Your Custom Sleeve"
+		fd.add_filter("*.png, *.jpg, *.jpeg, *.webp", "Image Files")
+		lobby_canvas.add_child(fd)
+		fd.file_selected.connect(func(path: String):
+			var my_s: int = nm.get_local_seat_id() if nm else 1
+			engine.set_player_sleeve(my_s, path)
+			mp_slv_btn.text = "🃏 Sleeve: " + path.get_file().left(12)
+			fd.queue_free()
+		)
+		fd.canceled.connect(func(): fd.queue_free())
+		fd.popup_centered(Vector2i(700, 500))
+	)
+	cos_row.add_child(mp_slv_btn)
+
+	var mp_mat_btn := Button.new()
+	mp_mat_btn.text = "🖼 Choose Playmat..."
+	mp_mat_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mp_mat_btn.custom_minimum_size = Vector2(0, 36)
+	mp_mat_btn.pressed.connect(func():
+		if OS.get_name() == "Android": OS.request_permissions()
+		var fd := FileDialog.new()
+		fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+		fd.access = FileDialog.ACCESS_FILESYSTEM
+		fd.use_native_dialog = true
+		fd.title = "Select Your Custom Playmat"
+		fd.add_filter("*.png, *.jpg, *.jpeg, *.webp", "Image Files")
+		lobby_canvas.add_child(fd)
+		fd.file_selected.connect(func(path: String):
+			var my_s: int = nm.get_local_seat_id() if nm else 1
+			engine.set_player_playmat(my_s, path)
+			mp_mat_btn.text = "🖼 Mat: " + path.get_file().left(12)
+			fd.queue_free()
+		)
+		fd.canceled.connect(func(): fd.queue_free())
+		fd.popup_centered(Vector2i(700, 500))
+	)
+	cos_row.add_child(mp_mat_btn)
+
+	var start_mp_btn := Button.new()
+	start_mp_btn.text = "🚀 Start Synchronized Match (Host)"
+	start_mp_btn.custom_minimum_size = Vector2(0, 44)
+	start_mp_btn.disabled = not (nm and nm.is_hosting and nm.is_network_active())
+	start_mp_btn.pressed.connect(func():
+		if not nm or not nm.is_hosting or not nm.is_network_active(): return
+		var final_decks: Dictionary = nm.seat_decks.duplicate(true)
+		var dk_keys := cached_decks.keys()
+		for s in [1, 2, 3, 4]:
+			if not final_decks.has(s) and not dk_keys.is_empty():
+				var pick_k = dk_keys[(s - 1) % dk_keys.size()]
+				final_decks[s] = cached_decks[pick_k]
+		var my_s: int = nm.get_local_seat_id()
+		nm.submit_local_cosmetics(str(engine.player_sleeves.get(my_s, "")), str(engine.player_playmats.get(my_s, "")))
+		nm.host_start_network_match(1, final_decks)
+	)
+	vbox.add_child(start_mp_btn)
+	if nm:
+		nm.lobby_updated.connect(func():
+			if is_instance_valid(start_mp_btn):
+				start_mp_btn.disabled = not (nm.is_hosting and nm.is_network_active())
+		)
 
 	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 10)

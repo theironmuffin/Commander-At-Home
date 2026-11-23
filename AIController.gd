@@ -14,6 +14,8 @@ func setup(main_engine: Node) -> void:
 func should_ai_act_on_priority(pid: int) -> bool:
 	if not engine or not engine.turn_manager.auto_pass_opponents:
 		return false
+	if engine.is_network_multiplayer() and not engine.network_manager.is_hosting:
+		return false
 	if engine.is_human_seat(pid):
 		return false
 	var tm: TurnManager = engine.turn_manager
@@ -64,6 +66,8 @@ func _execute_ai_step(pid: int) -> void:
 			took_free_action = _run_ai_main_phase(pid)
 		TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS:
 			_run_ai_attackers(pid)
+	if engine.is_network_multiplayer() and engine.network_manager.is_hosting and engine.has_method("sync_network_state"):
+		engine.sync_network_state()
 	if took_free_action and engine.active_stack.is_empty():
 		schedule_ai_action(pid)
 	else:
