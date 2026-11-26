@@ -128,6 +128,9 @@ static func _apply_layer_3_text(permanents: Array) -> void:
 static func _apply_layer_4_types(permanents: Array) -> void:
 	for source in permanents:
 		if not is_instance_valid(source): continue
+		if source.has_meta("animated_until_eot") or source.has_meta("animated_perm") or source.has_meta("crewed_until_eot"):
+			if "type_overrides" in source and not ("Creature" in source.type_overrides):
+				source.type_overrides.append("Creature")
 		var oracle: String = str(MagicRules.get_card_attribute(source.card_data, "oracle_text", "")).to_lower()
 
 		# Global land type shifts (e.g. Urborg, Blood Moon)
@@ -284,11 +287,15 @@ static func _apply_layer_7_power_toughness(permanents: Array, battlefield_lands:
 			var subj := line.split(split_tok)[0].strip_edges()
 			var mod := OracleParser.parse_pt_modifier(line)
 			if mod != Vector2i.ZERO:
-				for target in battlefield_non_lands:
-					if not is_instance_valid(target): continue
-					if _matches_anthem_subject(subj, target, source, controller):
-						target.layer_power_modifier += mod.x
-						target.layer_toughness_modifier += mod.y
+				var ant_mult: int = 1
+				if "for each " in line:
+					ant_mult = _count_matching_objects(line, controller, battlefield_lands, battlefield_non_lands, engine)
+				if ant_mult != 0:
+					for target in battlefield_non_lands:
+						if not is_instance_valid(target): continue
+						if _matches_anthem_subject(subj, target, source, controller):
+							target.layer_power_modifier += mod.x * ant_mult
+							target.layer_toughness_modifier += mod.y * ant_mult
 
 		# Attachments (Auras & Equipment): apply every P/T modifier line referencing enchanted/equipped host
 		var host: Node3D = source.get("attached_to")
@@ -297,8 +304,11 @@ static func _apply_layer_7_power_toughness(permanents: Array, battlefield_lands:
 				if "equipped creature" in line or "enchanted creature" in line or "equipped permanent" in line or "enchanted permanent" in line or ("it gets " in line and ("enchanted " in oracle or "equipped " in oracle)):
 					var mod := OracleParser.parse_pt_modifier(line)
 					if mod != Vector2i.ZERO:
-						host.layer_power_modifier += mod.x
-						host.layer_toughness_modifier += mod.y
+						var mult: int = 1
+						if "for each " in line:
+							mult = _count_matching_objects(line, controller, battlefield_lands, battlefield_non_lands, engine)
+						host.layer_power_modifier += mod.x * mult
+						host.layer_toughness_modifier += mod.y * mult
 
 	# Layer 7d (+1/+1 and -1/-1 counters) is folded into Card3D.reset_dynamic_stats().
 
@@ -331,7 +341,20 @@ static func _count_matching_objects(oracle: String, controller: int, battlefield
 		for c in battlefield_non_lands:
 			if is_instance_valid(c) and "enchantment" in MagicRules.get_card_type_line(c.card_data).to_lower() and _get_effective_controller(c) == controller:
 				count += 1
-	elif engine != null:
+	else:
+		var fe_rx := RegEx.new()
+		fe_rx.compile("for each ([a-z\\-]+) you control")
+		var fe_m := fe_rx.search(oracle)
+		if fe_m:
+			var want_t := fe_m.get_string(1).strip_edges().to_lower()
+			var sing_t := want_t.trim_suffix("s") if want_t.ends_with("s") and want_t.length() > 3 else want_t
+			for p in battlefield_lands + battlefield_non_lands:
+				if not is_instance_valid(p) or _get_effective_controller(p) != controller: continue
+				var tl := MagicRules.get_card_type_line(p.card_data).to_lower()
+				if sing_t == "permanent" or sing_t in tl or want_t in tl:
+					count += 1
+			return count
+	if count == 0 and engine != null:
 		if "cards in your hand" in oracle:
 			var h_arr: Array = engine.hand_cards if controller == engine.local_player_id else engine.player_hands.get(controller, [])
 			count = h_arr.size()
@@ -377,6 +400,19 @@ static func get_cost_reduction(card_data: Dictionary, caster_id: int, battlefiel
 			elif "noncreature spells you cast" in line and not ("creature" in tl): applies = true
 			elif "spells you cast" in line and not ("creature spells" in line or "artifact spells" in line or "enchantment spells" in line or "instant" in line or "sorcery" in line or "noncreature" in line): applies = true
 			if applies: total_red += amt
+	var card_ol := str(MagicRules.get_card_attribute(card_data, "oracle_text", "")).to_lower()
+	if "affinity for " in card_ol:
+		var aff_rx := RegEx.new()
+		aff_rx.compile("affinity for ([a-z]+)")
+		var am := aff_rx.search(card_ol)
+		if am:
+			var aff_t := am.get_string(1).strip_edges()
+			var singular := aff_t.trim_suffix("s") if aff_t.ends_with("s") else aff_t
+			for p in battlefield_lands + battlefield_non_lands:
+				if not is_instance_valid(p) or _get_effective_controller(p) != caster_id: continue
+				var p_tl := MagicRules.get_card_type_line(p.card_data).to_lower()
+				if singular in p_tl:
+					total_red += 1
 	return total_red
 
 static func apply_cost_reduction(mana_cost_str: String, reduction: int) -> String:

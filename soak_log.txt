@@ -1,0 +1,75 @@
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+
+
+============================================================
+  COMMANDER AT HOME — FULL REGRESSION & SOAK TEST SUITE
+============================================================
+
+[1/6] Testing OracleParser & ComprehensiveRules...
+  [PASS] Planeswalker Unicode minus loyalty abilities parsed (3)
+  [PASS] Unicode minus normalized to ASCII '-1'
+  [PASS] Dual-color mana ability parsed
+  [PASS] Multi-keyword line parsed
+  [PASS] Ward {2} parsed
+  [PASS] Crew 3 parsed
+  [PASS] Flashback cost parsed
+  [PASS] Foretell cost parsed
+  [PASS] Storm parsed
+  [PASS] ComprehensiveRules.lookup('704.5q') works
+
+[2/6] Testing Targeting, Protection (DEBT), Affinity & Fizzle...
+  [PASS] Protection from red blocks red targeting
+  [PASS] Hexproof blocks opponent targeting
+  [PASS] Shroud blocks controller targeting
+  [PASS] Affinity for artifacts reduced {4}{U} to {2}{U}
+  [PASS] Protection from red prevented non-combat red damage
+  [PASS] Ability fizzled cleanly when target became illegal (CR 608.2b)
+
+[3/6] Testing Triggers, Counters, Empower Jace, Day/Night & Monarch...
+  [PASS] Chasm Skulker gained +1/+1 counter on draw
+  [PASS] Prowess granted +1/+1 on noncreature spell cast
+  [PASS] Energy {E}{E} + Proliferate = 3 energy
+  [PASS] Proliferate incremented +1/+1 counter on Chasm Skulker to 2
+  [PASS] Empower Jace 3 + Empower Jace 1 = 4 loyalty on single Jace token
+  [PASS] Unused Jace token with 4 loyalty has golden sheen
+  [PASS] Undying returned creature with +1/+1 counter
+  [PASS] Finality counter exiled creature instead of graveyard
+  [PASS] Stun counter prevented untap
+  [PASS] Shield counter saved creature from Destroy
+  [PASS] CR 704.5q annihilated +1/+1 and -1/-1 counters
+  [PASS] Monarch, Initiative, and Night state tracked
+  [PASS] 'If you do' discard-to-draw drew replacement card
+
+[4/6] Testing Combat Keywords, Evasion, Animated Lands & SBAs...
+  [PASS] Deathtouch + Trample dealt 1 to 0/8 blocker and 3 trample to P2 (life=37)
+  [PASS] Lifelink gained 4 life for P1 (life=44)
+  [PASS] Deathtouch 1 damage killed 0/8 blocker via SBA
+  [PASS] First Strike killed 3/3 blocker before taking 3 normal damage
+  [PASS] Animated land is 3/2 Creature
+  [PASS] Attached Equipment stays untapped when host taps
+  [PASS] Animated land reverted to non-creature at Cleanup
+  [PASS] CR 704.5n detached Equipment when animated land stopped being a creature
+  [PASS] Defender blocked from attacking (CR 702.3)
+  [PASS] 10 Infect damage eliminated P3 via Poison SBA (CR 704.5c)
+  [PASS] Drawing from empty library eliminated player via CR 704.5b
+
+[5/6] Testing GameSerializer Full Fidelity & All 14 Table Surfaces...
+  [PASS] GameSerializer preserved attachments, energy counters, and Monarch
+  [PASS] All 14 table surfaces generated valid PBR materials
+
+[6/6] Running 12-Turn Multi-Mechanic 4-AI Commander Soak...
+  [PASS] Completed 12 full 4-AI turns without stalling (Turn 13 in 1066 steps)
+
+[7/7] Emulating 3 Full Games Using Random Cached Decks (10 turns each)...
+  Found 11 cached deck(s) in deck library.
+  Game 1/3: P1=Reality Fracture Precon | P2=Welcome to Zacama's Park | P3=Thorin + Blink = Treasures | P4=You Can't Spell Slaughter Without Laughter
+  [PASS] Cached-deck Game 1 completed 10 turns cleanly (Turn 11 in 891 steps)
+  Game 2/3: P1=Reality Fracture Precon | P2=Proper Pauper Pingin' and Slingin' | P3=It's Not Stealing If It's Already Dead | P4=Tidus Upgraded AF
+  [PASS] Cached-deck Game 2 completed 10 turns cleanly (Turn 11 in 1111 steps)
+  Game 3/3: P1=Counting Counters With Lucea Kane | P2=Proper Pauper Pingin' and Slingin' | P3=Kykar's Entourage | P4=Thorin + Blink = Treasures
+  [PASS] Cached-deck Game 3 completed 10 turns cleanly (Turn 11 in 1401 steps)
+
+============================================================
+  SUMMARY: 46 PASSED, 0 FAILED
+============================================================
+

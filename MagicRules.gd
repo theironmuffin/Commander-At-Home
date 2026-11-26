@@ -84,8 +84,14 @@ static func is_planeswalker(card_data: Dictionary, face_index: int = 0) -> bool:
 static func is_saga(card_data: Dictionary, face_index: int = 0) -> bool:
 	return "saga" in get_card_type_line(card_data, face_index).to_lower()
 
-static func is_creature(card_data: Dictionary, face_index: int = 0) -> bool:
-	return "creature" in get_card_type_line(card_data, face_index).to_lower()
+static func is_creature(card_data: Dictionary, face_index: int = 0, card_node: Node = null) -> bool:
+	if "creature" in get_card_type_line(card_data, face_index).to_lower():
+		return true
+	if card_node != null and is_instance_valid(card_node) and "type_overrides" in card_node:
+		for ov in card_node.type_overrides:
+			if str(ov).to_lower() == "creature":
+				return true
+	return false
 
 static func is_land(card_data: Dictionary, face_index: int = 0) -> bool:
 	return "land" in get_card_type_line(card_data, face_index).to_lower()
@@ -115,7 +121,9 @@ static func is_instant_speed(card_data: Dictionary, face_index: int = 0) -> bool
 	if "instant" in type_line:
 		return true
 	var oracle := str(get_card_attribute(card_data, "oracle_text", "", face_index)).to_lower()
-	return "flash" in oracle
+	var flash_rx := RegEx.new()
+	flash_rx.compile("(?:^|\\n|,\\s*)flash(?:\\s*(?:\\(|,|$|\\n))")
+	return flash_rx.search(oracle) != null
 
 static func get_base_power(card_data: Dictionary, face_index: int = 0) -> int:
 	var raw := str(get_card_attribute(card_data, "power", "0", face_index)).strip_edges()
@@ -160,9 +168,17 @@ static func count_legal_targets(requirement: String, caster_id: int, engine: Nod
 	return cnt
 
 static func is_legal_target(target_node: Variant, requirement: String, caster_id: int, source_card: Node3D = null) -> bool:
+	var req_check := requirement.to_lower().strip_edges()
+	if target_node is int:
+		var pid := int(target_node)
+		if pid < 1 or pid > 4: return false
+		if req_check.is_empty() or "any target" in req_check or "player" in req_check or "opponent" in req_check:
+			if "opponent" in req_check and not ("player" in req_check) and pid == caster_id:
+				return false
+			return true
+		return false
 	if not (target_node is Node3D) or not is_instance_valid(target_node):
 		return false
-	var req_check := requirement.to_lower().strip_edges()
 	if "graveyard" in req_check or "exile" in req_check:
 		if bool(target_node.get("is_on_battlefield")):
 			return false

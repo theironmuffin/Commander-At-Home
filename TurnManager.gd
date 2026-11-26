@@ -44,13 +44,14 @@ var engine: Node = null
 var active_player_id: int = 1
 var priority_player_id: int = 1
 var priority_passes_count: int = 0
-var auto_pass_opponents: bool = true
 var current_turn_phase: TurnPhase = TurnPhase.UNTAP
 var turn_number: int = 1
 
 var phase_stops: Dictionary = {}
 var pass_until_end_step: bool = false
-var hold_priority_in_response: bool = false
+var extra_turn_queue: Array[int] = []
+var extra_combat_phases: int = 0
+var delayed_triggers: Array[Dictionary] = []
 var _auto_pass_timer_active: bool = false
 var _cleanup_discard_pending: bool = false
 
@@ -80,18 +81,16 @@ func set_starting_player(pid: int) -> void:
 
 
 func has_local_player_interaction() -> bool:
-	if hold_priority_in_response:
-		return true
 	if bool(phase_stops.get(current_turn_phase, false)):
 		return true
 	if current_turn_phase == TurnPhase.COMBAT_DECLARE_BLOCKERS and engine.combat_manager.has_attackers_declared():
-		for c in engine.battlefield_non_lands:
+		for c in engine.battlefield_non_lands + engine.battlefield_lands:
 			if is_instance_valid(c) and bool(c.get("is_attacking")) and int(c.get("attacking_target_player_id")) == engine.local_player_id:
-				for blk in engine.battlefield_non_lands:
-					if is_instance_valid(blk) and engine.get_card_controller_id(blk) == engine.local_player_id and MagicRules.is_creature(blk.card_data) and not blk.is_tapped:
+				for blk in engine.battlefield_non_lands + engine.battlefield_lands:
+					if is_instance_valid(blk) and engine.get_card_controller_id(blk) == engine.local_player_id and MagicRules.is_creature(blk.card_data, 0, blk) and not blk.is_tapped:
 						return true
-	if active_player_id == engine.local_player_id and current_turn_phase == TurnPhase.COMBAT_DECLARE_ATTACKERS and not pass_until_end_step:
-		if _has_eligible_attackers(engine.local_player_id):
+	if active_player_id == engine.local_player_id and not pass_until_end_step:
+		if current_turn_phase == TurnPhase.COMBAT_DECLARE_ATTACKERS and (_has_eligible_attackers(engine.local_player_id) or engine.combat_manager.has_attackers_declared()):
 			return true
 	if engine.has_method("has_any_playable_card") and engine.has_any_playable_card():
 		return true
@@ -114,7 +113,7 @@ func _schedule_paced_auto_pass() -> void:
 		if engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open(): return
 		if priority_player_id == engine.local_player_id and not has_local_player_interaction():
 			pass_priority()
-		elif auto_pass_opponents and not engine.is_human_seat(priority_player_id) and (not engine.is_network_multiplayer() or engine.network_manager.is_hosting) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
+		elif not engine.is_human_seat(priority_player_id) and (not engine.is_network_multiplayer() or engine.network_manager.is_hosting) and not (engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id)):
 			pass_priority()
 	)
 
@@ -163,9 +162,12 @@ func pass_priority(from_network: bool = false) -> void:
 		priority_player_id = active_player_id
 		if not engine.active_stack.is_empty():
 			engine.resolve_top_stack_card()
+			if engine.is_network_multiplayer() and engine.network_manager.is_hosting and engine.has_method("sync_network_state"):
+				engine.sync_network_state()
+			var can_drive_ai: bool = (not engine.is_network_multiplayer()) or engine.network_manager.is_hosting
 			if engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id):
 				engine.ai_controller.schedule_ai_action(priority_player_id)
-			elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
+			elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (can_drive_ai and not engine.is_human_seat(priority_player_id)):
 				_schedule_paced_auto_pass()
 		else:
 			advance_turn_phase(false)
@@ -175,9 +177,10 @@ func pass_priority(from_network: bool = false) -> void:
 			(pass_until_end_step and priority_player_id == engine.local_player_id and engine.active_stack.is_empty() and not bool(phase_stops.get(current_turn_phase, false)) and not (current_turn_phase == TurnPhase.END and active_player_id == engine.local_player_id))
 			or (priority_player_id == engine.local_player_id and not has_local_player_interaction())
 		)
+		var can_drive_ai2: bool = (not engine.is_network_multiplayer()) or engine.network_manager.is_hosting
 		if engine.ai_controller and engine.ai_controller.should_ai_act_on_priority(priority_player_id):
 			engine.ai_controller.schedule_ai_action(priority_player_id)
-		elif should_auto_pass_local or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
+		elif should_auto_pass_local or (can_drive_ai2 and not engine.is_human_seat(priority_player_id)):
 			_schedule_paced_auto_pass()
 
 	EventBus.notify_priority(priority_player_id, priority_passes_count)
@@ -200,12 +203,13 @@ func advance_turn_phase(force_manual: bool = false) -> void:
 		var hit_end: bool = (current_turn_phase == TurnPhase.END and active_player_id == engine.local_player_id)
 		if hit_end or not engine.active_stack.is_empty() or bool(phase_stops.get(current_turn_phase, false)):
 			pass_until_end_step = false
-		elif not ai_will_act and (auto_pass_opponents or engine.is_human_seat(active_player_id)):
+		elif not ai_will_act:
 			_schedule_paced_auto_pass()
 
+	var can_drive_ai3: bool = (not engine.is_network_multiplayer()) or engine.network_manager.is_hosting
 	if ai_will_act:
 		engine.ai_controller.schedule_ai_action(priority_player_id)
-	elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (auto_pass_opponents and not engine.is_human_seat(priority_player_id)):
+	elif (priority_player_id == engine.local_player_id and not has_local_player_interaction()) or (can_drive_ai3 and not engine.is_human_seat(priority_player_id)):
 		_schedule_paced_auto_pass()
 
 	EventBus.notify_phase(current_turn_phase)
@@ -239,7 +243,9 @@ func _step_single_phase() -> void:
 	match current_turn_phase:
 		TurnPhase.UNTAP:
 			engine.empty_mana_pool()
-			for c in engine.battlefield_non_lands:
+			if "players_damaged_this_turn" in engine: engine.players_damaged_this_turn.clear()
+			if "eot_mana_bonuses" in engine: engine.eot_mana_bonuses.clear()
+			for c in engine.battlefield_non_lands + engine.battlefield_lands:
 				if is_instance_valid(c):
 					if "loyalty_activated_this_turn" in c: c.loyalty_activated_this_turn = false
 					if "goaded_by_player_id" in c and int(c.goaded_by_player_id) == active_player_id:
@@ -288,7 +294,11 @@ func _step_single_phase() -> void:
 			current_turn_phase = TurnPhase.COMBAT_END
 		TurnPhase.COMBAT_END:
 			engine.empty_mana_pool()
-			current_turn_phase = TurnPhase.POSTCOMBAT_MAIN
+			if extra_combat_phases > 0:
+				extra_combat_phases -= 1
+				current_turn_phase = TurnPhase.COMBAT_BEGIN
+			else:
+				current_turn_phase = TurnPhase.POSTCOMBAT_MAIN
 		TurnPhase.POSTCOMBAT_MAIN:
 			engine.empty_mana_pool()
 			current_turn_phase = TurnPhase.END
@@ -297,7 +307,17 @@ func _step_single_phase() -> void:
 				else: engine._draw_opponent_card(active_player_id)
 		TurnPhase.END:
 			engine.empty_mana_pool()
-			for c in engine.battlefield_non_lands.duplicate():
+			var rem_dt: Array[Dictionary] = []
+			for dt in delayed_triggers:
+				if int(dt.get("phase", TurnPhase.END)) == TurnPhase.END:
+					if dt.has("callback") and dt["callback"] is Callable and (dt["callback"] as Callable).is_valid():
+						(dt["callback"] as Callable).call()
+					else:
+						AbilityResolver.execute_effect_text(str(dt.get("effect", "")), dt.get("source", null), dt.get("target", null), engine, int(dt.get("owner_id", active_player_id)))
+				else:
+					rem_dt.append(dt)
+			delayed_triggers = rem_dt
+			for c in (engine.battlefield_non_lands + engine.battlefield_lands).duplicate():
 				if is_instance_valid(c) and c.has_meta("unearthed") and bool(c.get_meta("unearthed")):
 					c.remove_meta("unearthed")
 					engine.zone_manager.move_to_exile(c)
@@ -327,18 +347,27 @@ func _step_single_phase() -> void:
 							if dc.has_method("make_active"): dc.make_active(dc.card_data)
 							engine._on_card_to_graveyard(dc)
 					engine.zone_manager.update_opponent_hand_positions(active_player_id)
-			for c in engine.battlefield_non_lands:
+			for c in engine.battlefield_non_lands + engine.battlefield_lands:
 				if is_instance_valid(c):
 					c.temp_power_modifier = 0
 					c.temp_toughness_modifier = 0
 					if c.has_meta("temp_granted_keywords"): c.remove_meta("temp_granted_keywords")
-					if c.has_meta("base_pt_override"): c.remove_meta("base_pt_override")
+					if c.has_meta("base_pt_override") and (c.has_meta("base_pt_until_eot") or c.has_meta("animated_until_eot") or not MagicRules.is_land(c.card_data)):
+						c.remove_meta("base_pt_override")
+						c.remove_meta("base_pt_until_eot")
 					if c.has_meta("pt_switched"): c.remove_meta("pt_switched")
+					if c.has_meta("animated_until_eot"):
+						c.remove_meta("animated_until_eot")
+						if "type_overrides" in c: c.type_overrides.erase("Creature")
 					if c.has_meta("crewed_until_eot"):
 						c.remove_meta("crewed_until_eot")
 						if "type_overrides" in c: c.type_overrides.erase("Creature")
 					if c.has_meta("saddled_until_eot"):
 						c.remove_meta("saddled_until_eot")
+					if c.has_meta("control_until_eot") and bool(c.get_meta("control_until_eot")):
+						c.remove_meta("control_until_eot")
+						c.remove_meta("control_override_player_id")
+						engine.zone_manager.update_battlefield_positions(true)
 		TurnPhase.CLEANUP:
 			engine.empty_mana_pool()
 			if engine.battlefield_day_night == "Day" and engine.spells_cast_this_turn == 0:
@@ -346,7 +375,10 @@ func _step_single_phase() -> void:
 			elif engine.battlefield_day_night == "Night" and engine.spells_cast_this_turn >= 2:
 				engine.set_day_night("Day")
 			engine.spells_cast_this_turn = 0
-			active_player_id = get_next_player_id(active_player_id)
+			if not extra_turn_queue.is_empty():
+				active_player_id = int(extra_turn_queue.pop_front())
+			else:
+				active_player_id = get_next_player_id(active_player_id)
 			priority_player_id = active_player_id
 			if active_player_id == engine.starting_player_id:
 				turn_number += 1
@@ -377,10 +409,10 @@ func _has_upkeep_or_draw_trigger(phase: TurnPhase) -> bool:
 	return false
 
 func _has_eligible_attackers(pid: int) -> bool:
-	for card in engine.battlefield_non_lands:
+	for card in engine.battlefield_non_lands + engine.battlefield_lands:
 		if not is_instance_valid(card) or not card.is_on_battlefield: continue
 		if engine.get_card_owner_id(card) != pid: continue
-		if not MagicRules.is_creature(card.card_data): continue
+		if not MagicRules.is_creature(card.card_data, 0, card): continue
 		if card.is_tapped: continue
 		var has_haste: bool = card.has_method("has_keyword") and bool(card.has_keyword("haste"))
 		if not card.has_summoning_sickness or has_haste:

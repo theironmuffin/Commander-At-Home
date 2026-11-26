@@ -4,6 +4,8 @@ extends Node
 var engine: Node = null
 var _prefetch_urls: Array[String] = []
 var _prefetch_in_flight: int = 0
+var _prefetch_total: int = 0
+var _prefetch_done: int = 0
 var _pending_deck_loads: int = 0
 var _total_deck_loads: int = 0
 const MOBILE_DECK_CACHE_PATH = "user://deck_cache.json"
@@ -41,50 +43,226 @@ func show_deck_selector_ui() -> void:
 	engine.add_child(canvas)
 
 	var bg_overlay := ColorRect.new()
-	bg_overlay.color = Color(0.02, 0.03, 0.05, 0.84)
+	bg_overlay.color = Color(0.02, 0.03, 0.06, 0.74)
 	bg_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	canvas.add_child(bg_overlay)
 
+	var vp_sz := engine.get_viewport().get_visible_rect().size
+	var is_compact := vp_sz.x < 720.0
+
+	var pill_input_style := StyleBoxFlat.new()
+	pill_input_style.bg_color = Color(0.05, 0.06, 0.09, 0.96); pill_input_style.border_color = Color(0.32, 0.42, 0.56, 0.9); pill_input_style.set_border_width_all(1)
+	pill_input_style.corner_radius_top_left = 12; pill_input_style.corner_radius_top_right = 12; pill_input_style.corner_radius_bottom_left = 12; pill_input_style.corner_radius_bottom_right = 12
+	pill_input_style.content_margin_left = 14; pill_input_style.content_margin_right = 14
+
+	var pill_btn_style := StyleBoxFlat.new()
+	pill_btn_style.bg_color = Color(0.13, 0.17, 0.26, 0.96); pill_btn_style.border_color = Color(0.45, 0.58, 0.78, 0.85); pill_btn_style.set_border_width_all(1)
+	pill_btn_style.corner_radius_top_left = 12; pill_btn_style.corner_radius_top_right = 12; pill_btn_style.corner_radius_bottom_left = 12; pill_btn_style.corner_radius_bottom_right = 12
+	pill_btn_style.content_margin_left = 14; pill_btn_style.content_margin_right = 14
+
+	var hover_btn_style := pill_btn_style.duplicate()
+	hover_btn_style.bg_color = Color(0.20, 0.26, 0.38, 1.0); hover_btn_style.border_color = Color(0.95, 0.80, 0.42, 1.0)
+
+	var active_tab_style := pill_btn_style.duplicate()
+	active_tab_style.bg_color = Color(0.22, 0.30, 0.46, 1.0); active_tab_style.border_color = Color(0.95, 0.80, 0.40, 1.0)
+	active_tab_style.set_border_width_all(2)
+
+	var del_style := pill_btn_style.duplicate()
+	del_style.bg_color = Color(0.38, 0.13, 0.14, 0.96); del_style.border_color = Color(0.88, 0.35, 0.35, 0.95)
+
+	var start_btn_style := pill_btn_style.duplicate()
+	start_btn_style.bg_color = Color(0.14, 0.38, 0.22, 0.98); start_btn_style.border_color = Color(0.42, 0.85, 0.52, 1.0)
+	start_btn_style.set_border_width_all(2)
+
+	var hero_btn_style := pill_btn_style.duplicate()
+	hero_btn_style.bg_color = Color(0.16, 0.34, 0.24, 0.98); hero_btn_style.border_color = Color(0.95, 0.80, 0.40, 1.0)
+	hero_btn_style.set_border_width_all(2)
+
+	# ==========================================================
+	# STAGE 1: CINEMATIC SPLASH SCREEN
+	# ==========================================================
+	var splash_center := CenterContainer.new()
+	splash_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	canvas.add_child(splash_center)
+
+	var splash_card := PanelContainer.new()
+	splash_card.custom_minimum_size = Vector2(minf(540.0, vp_sz.x - 28.0), 0)
+	var splash_style := StyleBoxFlat.new()
+	splash_style.bg_color = Color(0.06, 0.07, 0.11, 0.92)
+	splash_style.border_color = Color(0.90, 0.75, 0.38, 0.95)
+	splash_style.set_border_width_all(2)
+	splash_style.corner_radius_top_left = 20; splash_style.corner_radius_top_right = 20
+	splash_style.corner_radius_bottom_left = 20; splash_style.corner_radius_bottom_right = 20
+	splash_style.content_margin_left = 34; splash_style.content_margin_right = 34
+	splash_style.content_margin_top = 30; splash_style.content_margin_bottom = 26
+	splash_card.add_theme_stylebox_override("panel", splash_style)
+	splash_center.add_child(splash_card)
+
+	var splash_vbox := VBoxContainer.new()
+	splash_vbox.add_theme_constant_override("separation", 14)
+	splash_card.add_child(splash_vbox)
+
+	# 5-Mana Pip Crest
+	var pip_row := HBoxContainer.new()
+	pip_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	pip_row.add_theme_constant_override("separation", 12)
+	splash_vbox.add_child(pip_row)
+	var pip_defs := [
+		["W", Color(0.98, 0.95, 0.78)],
+		["U", Color(0.32, 0.68, 0.98)],
+		["B", Color(0.62, 0.44, 0.78)],
+		["R", Color(0.95, 0.36, 0.28)],
+		["G", Color(0.32, 0.80, 0.44)]
+	]
+	for pd in pip_defs:
+		var pip_p := PanelContainer.new()
+		pip_p.custom_minimum_size = Vector2(30, 30)
+		var ps := StyleBoxFlat.new()
+		ps.bg_color = Color(pd[1].r * 0.28, pd[1].g * 0.28, pd[1].b * 0.28, 0.95)
+		ps.border_color = pd[1]; ps.set_border_width_all(2)
+		ps.corner_radius_top_left = 15; ps.corner_radius_top_right = 15; ps.corner_radius_bottom_left = 15; ps.corner_radius_bottom_right = 15
+		pip_p.add_theme_stylebox_override("panel", ps)
+		var pl := Label.new()
+		pl.text = pd[0]
+		pl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		pl.add_theme_font_size_override("font_size", 14)
+		pl.add_theme_color_override("font_color", pd[1])
+		pip_p.add_child(pl)
+		pip_row.add_child(pip_p)
+
+	var hero_title := Label.new()
+	hero_title.text = "COMMANDER AT HOME"
+	hero_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hero_title.add_theme_font_size_override("font_size", 34 if is_compact else 40)
+	hero_title.add_theme_color_override("font_color", Color(0.98, 0.86, 0.50, 1.0))
+	splash_vbox.add_child(hero_title)
+
+	var hero_sub := Label.new()
+	hero_sub.text = "FOUR-PLAYER 3D TABLETOP SIMULATOR"
+	hero_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hero_sub.add_theme_font_size_override("font_size", 13)
+	hero_sub.add_theme_color_override("font_color", Color(0.68, 0.76, 0.88, 0.95))
+	splash_vbox.add_child(hero_sub)
+
+	splash_vbox.add_child(HSeparator.new())
+
+	var splash_play_btn := Button.new()
+	splash_play_btn.text = "PLAY COMMANDER"
+	splash_play_btn.custom_minimum_size = Vector2(0, 52)
+	splash_play_btn.add_theme_font_size_override("font_size", 18)
+	splash_play_btn.add_theme_stylebox_override("normal", hero_btn_style)
+	splash_play_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	splash_vbox.add_child(splash_play_btn)
+
+	var has_save: bool = "SAVE_GAME_PATH" in engine and FileAccess.file_exists(engine.SAVE_GAME_PATH)
+	var splash_resume_btn: Button = null
+	if has_save:
+		splash_resume_btn = Button.new()
+		splash_resume_btn.text = "RESUME SAVED GAME"
+		splash_resume_btn.custom_minimum_size = Vector2(0, 48)
+		splash_resume_btn.add_theme_font_size_override("font_size", 16)
+		splash_resume_btn.add_theme_stylebox_override("normal", active_tab_style)
+		splash_resume_btn.add_theme_stylebox_override("hover", hover_btn_style)
+		splash_resume_btn.pressed.connect(func():
+			if engine.has_method("load_game_from_disk") and engine.load_game_from_disk():
+				canvas.queue_free()
+				if engine.has_method("refresh_playable_card_glows"):
+					engine.refresh_playable_card_glows()
+				if engine.has_method("resume_gameplay_after_decision"):
+					engine.resume_gameplay_after_decision()
+			elif engine.hud_manager and engine.hud_manager.has_method("show_toast"):
+				engine.hud_manager.show_toast("Could not load saved game.", Color(1.0, 0.4, 0.35, 1.0))
+		)
+		splash_vbox.add_child(splash_resume_btn)
+
+	var splash_lib_btn := Button.new()
+	splash_lib_btn.text = "DECK LIBRARY & IMPORTS"
+	splash_lib_btn.custom_minimum_size = Vector2(0, 46)
+	splash_lib_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	splash_lib_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	splash_vbox.add_child(splash_lib_btn)
+
+	var splash_mp_btn := Button.new()
+	splash_mp_btn.text = "MULTIPLAYER LOBBY"
+	splash_mp_btn.custom_minimum_size = Vector2(0, 46)
+	splash_mp_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	splash_mp_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	splash_vbox.add_child(splash_mp_btn)
+
+	var splash_set_btn := Button.new()
+	splash_set_btn.text = "TABLE, AUDIO & FONT"
+	splash_set_btn.custom_minimum_size = Vector2(0, 46)
+	splash_set_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	splash_set_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	splash_vbox.add_child(splash_set_btn)
+
+	var splash_hint := Label.new()
+	splash_hint.text = ("D-Pad / Stick: Navigate  •  A: Select  •  LB/RB: Tabs" if not Input.get_connected_joypads().is_empty() else "Touch, Mouse, Keyboard (Tab/Arrows) & Controller Ready")
+	splash_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	splash_hint.add_theme_font_size_override("font_size", 12)
+	splash_hint.add_theme_color_override("font_color", Color(0.60, 0.66, 0.76, 0.9))
+	splash_vbox.add_child(splash_hint)
+
+	splash_card.modulate.a = 0.0
+	var sp_tw := engine.create_tween()
+	sp_tw.tween_property(splash_card, "modulate:a", 1.0, 0.35).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+	# ==========================================================
+	# STAGE 2: REDESIGNED MATCH SETUP CONSOLE
+	# ==========================================================
 	var center_container := CenterContainer.new()
 	center_container.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center_container.visible = false
 	canvas.add_child(center_container)
 
 	var panel := PanelContainer.new()
-	var vp_sz := engine.get_viewport().get_visible_rect().size
-	panel.custom_minimum_size = Vector2(minf(820.0, vp_sz.x - 24.0), minf(560.0, vp_sz.y - 24.0))
+	panel.custom_minimum_size = Vector2(minf(860.0, vp_sz.x - 24.0), minf(580.0, vp_sz.y - 24.0))
 	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.09, 0.10, 0.14, 0.98); panel_style.border_color = Color(0.85, 0.7, 0.35, 0.9); panel_style.set_border_width_all(2)
-	panel_style.corner_radius_top_left = 14; panel_style.corner_radius_top_right = 14; panel_style.corner_radius_bottom_left = 14; panel_style.corner_radius_bottom_right = 14
-	panel_style.content_margin_left = 26; panel_style.content_margin_right = 26; panel_style.content_margin_top = 20; panel_style.content_margin_bottom = 20
+	panel_style.bg_color = Color(0.06, 0.07, 0.11, 0.95); panel_style.border_color = Color(0.90, 0.75, 0.38, 0.92); panel_style.set_border_width_all(2)
+	panel_style.corner_radius_top_left = 18; panel_style.corner_radius_top_right = 18; panel_style.corner_radius_bottom_left = 18; panel_style.corner_radius_bottom_right = 18
+	panel_style.content_margin_left = 26; panel_style.content_margin_right = 26; panel_style.content_margin_top = 18; panel_style.content_margin_bottom = 18
 	panel.add_theme_stylebox_override("panel", panel_style)
 	center_container.add_child(panel)
 
 	var root_vbox := VBoxContainer.new()
-	root_vbox.add_theme_constant_override("separation", 14)
+	root_vbox.add_theme_constant_override("separation", 12)
 	panel.add_child(root_vbox)
 
+	var setup_hdr_hbox := HBoxContainer.new()
+	setup_hdr_hbox.add_theme_constant_override("separation", 10)
+	root_vbox.add_child(setup_hdr_hbox)
+
+	var back_title_btn := Button.new()
+	back_title_btn.text = "← Title"
+	back_title_btn.custom_minimum_size = Vector2(96, 38)
+	back_title_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	back_title_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	setup_hdr_hbox.add_child(back_title_btn)
+
 	var title := Label.new()
-	title.text = "MTG COMMANDER 3D — MATCH SETUP"
+	title.text = "MATCH SETUP"
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", Color(1, 0.85, 0.4, 1))
-	root_vbox.add_child(title)
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color(0.98, 0.86, 0.50, 1.0))
+	setup_hdr_hbox.add_child(title)
 
-	var pill_input_style := StyleBoxFlat.new()
-	pill_input_style.bg_color = Color(0.06, 0.07, 0.09, 1.0); pill_input_style.border_color = Color(0.22, 0.32, 0.44, 1.0); pill_input_style.set_border_width_all(1)
-	pill_input_style.corner_radius_top_left = 18; pill_input_style.corner_radius_top_right = 18; pill_input_style.corner_radius_bottom_left = 18; pill_input_style.corner_radius_bottom_right = 18
-	pill_input_style.content_margin_left = 14
-
-	var pill_btn_style := StyleBoxFlat.new()
-	pill_btn_style.bg_color = Color(0.15, 0.22, 0.35, 1.0); pill_btn_style.border_color = Color(0.35, 0.55, 0.85, 1.0); pill_btn_style.set_border_width_all(1)
-	pill_btn_style.corner_radius_top_left = 18; pill_btn_style.corner_radius_top_right = 18; pill_btn_style.corner_radius_bottom_left = 18; pill_btn_style.corner_radius_bottom_right = 18
-
-	var active_tab_style := pill_btn_style.duplicate()
-	active_tab_style.bg_color = Color(0.24, 0.34, 0.52, 1.0); active_tab_style.border_color = Color(0.85, 0.7, 0.35, 1.0)
-	var del_style := pill_btn_style.duplicate()
-	del_style.bg_color = Color(0.38, 0.14, 0.14, 1.0); del_style.border_color = Color(0.85, 0.35, 0.35, 1.0)
-	var start_btn_style := pill_btn_style.duplicate()
-	start_btn_style.bg_color = Color(0.18, 0.38, 0.22, 1.0); start_btn_style.border_color = Color(0.35, 0.72, 0.42, 1.0)
+	var font_toggle_btn := Button.new()
+	var _font_lbl := func() -> String:
+		var m_str: String = str(engine.ui_font_mode) if "ui_font_mode" in engine else "mustica"
+		return "Font: MusticaPro" if m_str == "mustica" else "Font: Beleren"
+	font_toggle_btn.text = _font_lbl.call()
+	font_toggle_btn.custom_minimum_size = Vector2(150, 38)
+	font_toggle_btn.add_theme_stylebox_override("normal", pill_btn_style)
+	font_toggle_btn.add_theme_stylebox_override("hover", hover_btn_style)
+	font_toggle_btn.pressed.connect(func():
+		if "ui_font_mode" in engine:
+			engine.ui_font_mode = "beleren" if engine.ui_font_mode == "mustica" else "mustica"
+			font_toggle_btn.text = _font_lbl.call()
+			engine.hud_manager.apply_custom_font(canvas)
+	)
+	setup_hdr_hbox.add_child(font_toggle_btn)
 
 	# --- Top Step / Tab Navigation Bar ---
 	var tab_bar := HBoxContainer.new()
@@ -94,19 +272,19 @@ func show_deck_selector_ui() -> void:
 	var tab_library_btn := Button.new()
 	tab_library_btn.text = "1. Deck Library"
 	tab_library_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tab_library_btn.custom_minimum_size = Vector2(0, 38)
+	tab_library_btn.custom_minimum_size = Vector2(0, 42)
 	tab_bar.add_child(tab_library_btn)
 
 	var tab_table_btn := Button.new()
-	tab_table_btn.text = "2. Table Settings"
+	tab_table_btn.text = "2. Table & Audio"
 	tab_table_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tab_table_btn.custom_minimum_size = Vector2(0, 38)
+	tab_table_btn.custom_minimum_size = Vector2(0, 42)
 	tab_bar.add_child(tab_table_btn)
 
 	var tab_players_btn := Button.new()
-	tab_players_btn.text = "3. Player Setup & Start"
+	tab_players_btn.text = "3. Seats & Launch"
 	tab_players_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tab_players_btn.custom_minimum_size = Vector2(0, 38)
+	tab_players_btn.custom_minimum_size = Vector2(0, 42)
 	tab_bar.add_child(tab_players_btn)
 
 	root_vbox.add_child(HSeparator.new())
@@ -207,7 +385,7 @@ func show_deck_selector_ui() -> void:
 	pm_btn.custom_minimum_size = Vector2(0, 40)
 	pm_btn.add_theme_stylebox_override("normal", pill_btn_style)
 	pm_btn.pressed.connect(func():
-		var themes := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment"]
+		var themes: Array = Array(engine.TABLE_SURFACES)
 		var cur_idx: int = themes.find(str(engine.current_playmat_theme))
 		engine.apply_playmat_theme(themes[(cur_idx + 1) % themes.size()])
 		pm_btn.text = _pm_lbl.call()
@@ -228,17 +406,6 @@ func show_deck_selector_ui() -> void:
 			diff_btn.text = _diff_lbl.call()
 	)
 	tbl_grid.add_child(diff_btn)
-
-	var auto_btn := Button.new()
-	auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
-	auto_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	auto_btn.custom_minimum_size = Vector2(0, 40)
-	auto_btn.add_theme_stylebox_override("normal", pill_btn_style)
-	auto_btn.pressed.connect(func():
-		engine.turn_manager.auto_pass_opponents = not engine.turn_manager.auto_pass_opponents
-		auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
-	)
-	tbl_grid.add_child(auto_btn)
 
 	var mv_box := HBoxContainer.new()
 	mv_box.add_theme_constant_override("separation", 8)
@@ -293,7 +460,7 @@ func show_deck_selector_ui() -> void:
 
 	var player_dropdowns := {}
 	var player_active_flags := {1: true, 2: true, 3: true, 4: true}
-	var player_names := {1: "Player 1 (You)", 2: "Player 2 (Left)", 3: "Player 3 (Across)", 4: "Player 4 (Right)"}
+	var _player_names := {1: "Player 1 (You)", 2: "Player 2 (Left)", 3: "Player 3 (Across)", 4: "Player 4 (Right)"}
 
 	var update_deck_summary := func():
 		if manage_opt.get_item_count() == 0 or manage_opt.selected < 0:
@@ -356,37 +523,111 @@ func show_deck_selector_ui() -> void:
 			populate_all_dropdowns.call()
 	)
 
+	var _make_sleeve_thumb := func(path: String) -> Texture2D:
+		if not path.is_empty() and FileAccess.file_exists(path):
+			var img := Image.load_from_file(path)
+			if img and not img.is_empty():
+				img.resize(32, 42, Image.INTERPOLATE_LANCZOS)
+				return ImageTexture.create_from_image(img)
+		var def_tex: Texture2D = load("res://card_back.jpg") as Texture2D
+		if def_tex != null:
+			var def_img: Image = def_tex.get_image()
+			if def_img and not def_img.is_empty():
+				var dup_img: Image = def_img.duplicate() as Image
+				dup_img.resize(32, 42, Image.INTERPOLATE_LANCZOS)
+				return ImageTexture.create_from_image(dup_img)
+		var fb := Image.create(32, 42, false, Image.FORMAT_RGBA8)
+		fb.fill(Color(0.10, 0.17, 0.34, 1.0))
+		return ImageTexture.create_from_image(fb)
+
+	var _make_playmat_thumb := func(path: String) -> Texture2D:
+		if not path.is_empty() and FileAccess.file_exists(path):
+			var img := Image.load_from_file(path)
+			if img and not img.is_empty():
+				img.resize(58, 34, Image.INTERPOLATE_LANCZOS)
+				return ImageTexture.create_from_image(img)
+		var def_tex: Texture2D = engine._get_default_player_playmat_texture() if engine.has_method("_get_default_player_playmat_texture") else null
+		if def_tex != null:
+			var def_img := def_tex.get_image()
+			if def_img and not def_img.is_empty():
+				var dup_img := def_img.duplicate()
+				dup_img.resize(58, 34, Image.INTERPOLATE_LANCZOS)
+				return ImageTexture.create_from_image(dup_img)
+		var fb := Image.create(58, 34, false, Image.FORMAT_RGBA8)
+		fb.fill(Color(0.11, 0.13, 0.17, 1.0))
+		return ImageTexture.create_from_image(fb)
+
+	var hdr_hbox := HBoxContainer.new()
+	hdr_hbox.add_theme_constant_override("separation", 10)
+	page_players.add_child(hdr_hbox)
+
+	var hdr_p := Label.new()
+	hdr_p.text = ""
+	hdr_p.custom_minimum_size = Vector2(36, 0)
+	hdr_hbox.add_child(hdr_p)
+
+	var hdr_on := Label.new()
+	hdr_on.text = ""
+	hdr_on.custom_minimum_size = Vector2(52, 0)
+	hdr_hbox.add_child(hdr_on)
+
+	var hdr_deck := Label.new()
+	hdr_deck.text = "Deck"
+	hdr_deck.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hdr_deck.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr_deck.add_theme_font_size_override("font_size", 13)
+	hdr_deck.add_theme_color_override("font_color", Color(0.95, 0.78, 0.35, 1.0))
+	hdr_hbox.add_child(hdr_deck)
+
+	var hdr_slv := Label.new()
+	hdr_slv.text = "Sleeves"
+	hdr_slv.custom_minimum_size = Vector2(84, 0)
+	hdr_slv.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr_slv.add_theme_font_size_override("font_size", 13)
+	hdr_slv.add_theme_color_override("font_color", Color(0.95, 0.78, 0.35, 1.0))
+	hdr_hbox.add_child(hdr_slv)
+
+	var hdr_mat := Label.new()
+	hdr_mat.text = "Playmat"
+	hdr_mat.custom_minimum_size = Vector2(112, 0)
+	hdr_mat.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr_mat.add_theme_font_size_override("font_size", 13)
+	hdr_mat.add_theme_color_override("font_color", Color(0.95, 0.78, 0.35, 1.0))
+	hdr_hbox.add_child(hdr_mat)
+
 	for i in range(1, 5):
 		var hbox := HBoxContainer.new()
 		hbox.add_theme_constant_override("separation", 10)
 		page_players.add_child(hbox)
 
+		var lbl := Label.new()
+		lbl.text = "P%d" % i
+		lbl.custom_minimum_size = Vector2(36, 0)
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.add_theme_color_override("font_color", Color(0.95, 0.85, 0.55, 1.0) if i == 1 else Color(0.90, 0.92, 0.96, 1.0))
+		hbox.add_child(lbl)
+
 		var active_toggle := Button.new()
 		active_toggle.text = "ON"
-		active_toggle.custom_minimum_size = Vector2(46, 40)
+		active_toggle.custom_minimum_size = Vector2(52, 46)
 		active_toggle.disabled = (i == 1)
 		hbox.add_child(active_toggle)
 
-		var lbl := Label.new()
-		lbl.text = player_names[i]
-		lbl.custom_minimum_size = Vector2(125, 0)
-		hbox.add_child(lbl)
-
 		var prev_btn := Button.new()
 		prev_btn.text = "◀"
-		prev_btn.custom_minimum_size = Vector2(36, 40)
+		prev_btn.custom_minimum_size = Vector2(36, 46)
 		hbox.add_child(prev_btn)
 
 		var option_btn := OptionButton.new()
 		option_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		option_btn.custom_minimum_size = Vector2(220, 40)
+		option_btn.custom_minimum_size = Vector2(220, 46)
 		option_btn.add_theme_stylebox_override("normal", pill_input_style)
 		hbox.add_child(option_btn)
 		player_dropdowns[i] = option_btn
 
 		var next_btn := Button.new()
 		next_btn.text = "▶"
-		next_btn.custom_minimum_size = Vector2(36, 40)
+		next_btn.custom_minimum_size = Vector2(36, 46)
 		hbox.add_child(next_btn)
 
 		prev_btn.pressed.connect(func():
@@ -398,18 +639,33 @@ func show_deck_selector_ui() -> void:
 			if cnt > 0: option_btn.select((option_btn.selected + 1) % cnt)
 		)
 
+		var thumb_style := StyleBoxFlat.new()
+		thumb_style.bg_color = Color(0.04, 0.06, 0.11, 0.92)
+		thumb_style.border_color = Color(0.86, 0.72, 0.34, 0.92)
+		thumb_style.set_border_width_all(2)
+		thumb_style.set_corner_radius_all(6)
+		thumb_style.set_content_margin_all(2)
+
+		var thumb_hover := thumb_style.duplicate() as StyleBoxFlat
+		thumb_hover.border_color = Color(0.98, 0.85, 0.45, 1.0)
+
 		var sleeve_btn := Button.new()
 		var cur_slv: String = str(engine.player_sleeves.get(i, "")) if "player_sleeves" in engine else ""
-		sleeve_btn.text = ("Sleeve: " + cur_slv.get_file().left(10)) if not cur_slv.is_empty() else "Sleeve: Default"
-		sleeve_btn.custom_minimum_size = Vector2(122, 40)
-		sleeve_btn.add_theme_stylebox_override("normal", pill_btn_style)
-		sleeve_btn.add_theme_stylebox_override("hover", pill_btn_style)
+		sleeve_btn.text = ""
+		sleeve_btn.icon = _make_sleeve_thumb.call(cur_slv)
+		sleeve_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		sleeve_btn.expand_icon = true
+		sleeve_btn.tooltip_text = ("Sleeve: " + cur_slv.get_file()) if not cur_slv.is_empty() else "Select Custom Sleeve"
+		sleeve_btn.custom_minimum_size = Vector2(40, 50)
+		sleeve_btn.add_theme_stylebox_override("normal", thumb_style)
+		sleeve_btn.add_theme_stylebox_override("hover", thumb_hover)
+		sleeve_btn.add_theme_stylebox_override("pressed", thumb_hover)
 		hbox.add_child(sleeve_btn)
 
 		var sleeve_rst := Button.new()
 		sleeve_rst.text = "✕"
 		sleeve_rst.tooltip_text = "Reset sleeve to default"
-		sleeve_rst.custom_minimum_size = Vector2(36, 40)
+		sleeve_rst.custom_minimum_size = Vector2(34, 46)
 		sleeve_rst.add_theme_stylebox_override("normal", del_style)
 		sleeve_rst.add_theme_stylebox_override("hover", del_style)
 		hbox.add_child(sleeve_rst)
@@ -427,8 +683,10 @@ func show_deck_selector_ui() -> void:
 			canvas.add_child(fd)
 			fd.file_selected.connect(func(path: String):
 				if engine.has_method("set_player_sleeve"):
-					engine.set_player_sleeve(pid_cap, path)
-				sleeve_btn.text = "Sleeve: " + path.get_file().left(10)
+					var safe_p: String = engine.cache_custom_image_locally(path, "sleeve") if engine.has_method("cache_custom_image_locally") else path
+					engine.set_player_sleeve(pid_cap, safe_p)
+				sleeve_btn.icon = _make_sleeve_thumb.call(path)
+				sleeve_btn.tooltip_text = "Sleeve: " + path.get_file()
 				fd.queue_free()
 			)
 			fd.canceled.connect(func(): fd.queue_free())
@@ -437,21 +695,27 @@ func show_deck_selector_ui() -> void:
 		sleeve_rst.pressed.connect(func():
 			if engine.has_method("set_player_sleeve"):
 				engine.set_player_sleeve(pid_cap, "")
-			sleeve_btn.text = "Sleeve: Default"
+			sleeve_btn.icon = _make_sleeve_thumb.call("")
+			sleeve_btn.tooltip_text = "Select Custom Sleeve"
 		)
 
 		var mat_btn := Button.new()
 		var cur_pm: String = str(engine.player_playmats.get(i, "")) if "player_playmats" in engine else ""
-		mat_btn.text = ("Mat: " + cur_pm.get_file().left(8)) if not cur_pm.is_empty() else "Mat: Default"
-		mat_btn.custom_minimum_size = Vector2(108, 40)
-		mat_btn.add_theme_stylebox_override("normal", pill_btn_style)
-		mat_btn.add_theme_stylebox_override("hover", pill_btn_style)
+		mat_btn.text = ""
+		mat_btn.icon = _make_playmat_thumb.call(cur_pm)
+		mat_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		mat_btn.expand_icon = true
+		mat_btn.tooltip_text = ("Playmat: " + cur_pm.get_file()) if not cur_pm.is_empty() else "Select Custom Playmat"
+		mat_btn.custom_minimum_size = Vector2(68, 44)
+		mat_btn.add_theme_stylebox_override("normal", thumb_style)
+		mat_btn.add_theme_stylebox_override("hover", thumb_hover)
+		mat_btn.add_theme_stylebox_override("pressed", thumb_hover)
 		hbox.add_child(mat_btn)
 
 		var mat_rst := Button.new()
 		mat_rst.text = "✕"
 		mat_rst.tooltip_text = "Reset player playmat to default"
-		mat_rst.custom_minimum_size = Vector2(36, 40)
+		mat_rst.custom_minimum_size = Vector2(34, 46)
 		mat_rst.add_theme_stylebox_override("normal", del_style)
 		mat_rst.add_theme_stylebox_override("hover", del_style)
 		hbox.add_child(mat_rst)
@@ -468,8 +732,10 @@ func show_deck_selector_ui() -> void:
 			canvas.add_child(fd)
 			fd.file_selected.connect(func(path: String):
 				if engine.has_method("set_player_playmat"):
-					engine.set_player_playmat(pid_cap, path)
-				mat_btn.text = "Mat: " + path.get_file().left(8)
+					var safe_p: String = engine.cache_custom_image_locally(path, "playmat") if engine.has_method("cache_custom_image_locally") else path
+					engine.set_player_playmat(pid_cap, safe_p)
+				mat_btn.icon = _make_playmat_thumb.call(path)
+				mat_btn.tooltip_text = "Playmat: " + path.get_file()
 				fd.queue_free()
 			)
 			fd.canceled.connect(func(): fd.queue_free())
@@ -478,7 +744,8 @@ func show_deck_selector_ui() -> void:
 		mat_rst.pressed.connect(func():
 			if engine.has_method("set_player_playmat"):
 				engine.set_player_playmat(pid_cap, "")
-			mat_btn.text = "Mat: Default"
+			mat_btn.icon = _make_playmat_thumb.call("")
+			mat_btn.tooltip_text = "Select Custom Playmat"
 		)
 		active_toggle.pressed.connect(func():
 			var next_on := not bool(player_active_flags.get(pid_cap, true))
@@ -502,45 +769,6 @@ func show_deck_selector_ui() -> void:
 			import_deck_from_url_multi(url, url_input, import_btn, populate_all_dropdowns)
 	)
 
-	var first_hbox := HBoxContainer.new()
-	first_hbox.add_theme_constant_override("separation", 10)
-	page_players.add_child(first_hbox)
-
-	var first_lbl := Label.new()
-	first_lbl.text = "First Player:"
-	first_lbl.custom_minimum_size = Vector2(125, 0)
-	first_hbox.add_child(first_lbl)
-
-	var first_prev := Button.new()
-	first_prev.text = "◀"
-	first_prev.custom_minimum_size = Vector2(36, 38)
-	first_hbox.add_child(first_prev)
-
-	var first_opt := OptionButton.new()
-	first_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	first_opt.custom_minimum_size = Vector2(220, 38)
-	first_opt.add_theme_stylebox_override("normal", pill_input_style)
-	first_opt.add_item("Random (Roll)"); first_opt.set_item_metadata(0, 0)
-	first_opt.add_item("Player 1 (You)"); first_opt.set_item_metadata(1, 1)
-	first_opt.add_item("Player 2 (Left)"); first_opt.set_item_metadata(2, 2)
-	first_opt.add_item("Player 3 (Across)"); first_opt.set_item_metadata(3, 3)
-	first_opt.add_item("Player 4 (Right)"); first_opt.set_item_metadata(4, 4)
-	first_hbox.add_child(first_opt)
-
-	var first_next := Button.new()
-	first_next.text = "▶"
-	first_next.custom_minimum_size = Vector2(36, 38)
-	first_hbox.add_child(first_next)
-
-	first_prev.pressed.connect(func():
-		var cnt := first_opt.get_item_count()
-		if cnt > 0: first_opt.select((first_opt.selected - 1 + cnt) % cnt)
-	)
-	first_next.pressed.connect(func():
-		var cnt := first_opt.get_item_count()
-		if cnt > 0: first_opt.select((first_opt.selected + 1) % cnt)
-	)
-
 	var load_btn := Button.new()
 	load_btn.text = "LOAD ALL DECKS & START GAME"
 	load_btn.custom_minimum_size = Vector2(0, 48)
@@ -557,11 +785,6 @@ func show_deck_selector_ui() -> void:
 				continue
 			var opt: OptionButton = player_dropdowns[i]
 			selections[i] = opt.get_item_metadata(opt.selected) if opt.get_item_count() > 0 and opt.selected >= 0 else opt.get_item_metadata(0)
-		var active_keys: Array = selections.keys()
-		var chosen_first: int = int(first_opt.get_item_metadata(first_opt.selected))
-		if chosen_first == 0 or not (chosen_first in active_keys):
-			chosen_first = int(active_keys[randi() % active_keys.size()]) if not active_keys.is_empty() else 1
-		engine.starting_player_id = chosen_first
 		if engine.has_method("set_inactive_players"):
 			engine.set_inactive_players(inactive_pids)
 		canvas.queue_free()
@@ -583,8 +806,68 @@ func show_deck_selector_ui() -> void:
 	lib_next_btn.pressed.connect(func(): _switch_tab.call(1))
 	tbl_next_btn.pressed.connect(func(): _switch_tab.call(2))
 
-	_switch_tab.call(0 if _load_deck_cache().is_empty() else 2)
+	var _current_tab := [0]
+	var _open_setup_tab := func(t_idx: int):
+		_current_tab[0] = t_idx
+		splash_center.visible = false
+		center_container.visible = true
+		_switch_tab.call(t_idx)
+		if t_idx == 0: url_input.grab_focus()
+		elif t_idx == 1: pm_btn.grab_focus()
+		else: load_btn.grab_focus()
+
+	var _show_splash := func():
+		center_container.visible = false
+		splash_center.visible = true
+		splash_play_btn.grab_focus()
+
+	splash_play_btn.pressed.connect(func():
+		_open_setup_tab.call(0 if _load_deck_cache().is_empty() else 2)
+	)
+	splash_lib_btn.pressed.connect(func(): _open_setup_tab.call(0))
+	splash_set_btn.pressed.connect(func(): _open_setup_tab.call(1))
+	splash_mp_btn.pressed.connect(func():
+		if engine.hud_manager and engine.hud_manager.has_method("open_multiplayer_lobby"):
+			engine.hud_manager.open_multiplayer_lobby()
+	)
+	back_title_btn.pressed.connect(_show_splash)
+
+	# Controller LB/RB tab switching & B/Esc back-to-title
+	var nav_node := Node.new()
+	var nav_script := GDScript.new()
+	nav_script.source_code = """extends Node
+var on_prev_tab: Callable
+var on_next_tab: Callable
+var on_back: Callable
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventJoypadButton and event.pressed:
+		if event.button_index == JOY_BUTTON_LEFT_SHOULDER and on_prev_tab.is_valid():
+			on_prev_tab.call(); get_viewport().set_input_as_handled()
+		elif event.button_index == JOY_BUTTON_RIGHT_SHOULDER and on_next_tab.is_valid():
+			on_next_tab.call(); get_viewport().set_input_as_handled()
+		elif event.button_index == JOY_BUTTON_B and on_back.is_valid():
+			on_back.call(); get_viewport().set_input_as_handled()
+	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE and on_back.is_valid():
+		on_back.call(); get_viewport().set_input_as_handled()
+"""
+	nav_script.reload()
+	nav_node.set_script(nav_script)
+	nav_node.set("on_prev_tab", func():
+		if center_container.visible: _open_setup_tab.call((int(_current_tab[0]) + 2) % 3)
+	)
+	nav_node.set("on_next_tab", func():
+		if center_container.visible: _open_setup_tab.call((int(_current_tab[0]) + 1) % 3)
+	)
+	nav_node.set("on_back", func():
+		if center_container.visible: _show_splash.call()
+	)
+	canvas.add_child(nav_node)
+
 	engine.hud_manager.apply_custom_font(canvas)
+	if splash_resume_btn != null:
+		splash_resume_btn.grab_focus()
+	else:
+		splash_play_btn.grab_focus()
 
 func import_deck_from_url_multi(url: String, line_edit: LineEdit, import_btn: Button, refresh_callback: Callable) -> void:
 	var clean_url := url.strip_edges()
@@ -867,7 +1150,10 @@ func load_and_spawn_all_decks(selections: Dictionary) -> void:
 			engine.hud_manager.update_loading_progress(progress, "Loaded Player %d deck..." % pid)
 			if _pending_deck_loads <= 0:
 				engine.hud_manager.hide_loading_screen()
-				engine.start_mulligan_phase()
+				if engine.has_method("start_first_player_decision"):
+					engine.start_first_player_decision()
+				else:
+					engine.start_mulligan_phase()
 		)
 
 func process_player_deck(pid: int, _deck_info: Dictionary, cards_array: Array, raw_commander_str: String) -> void:
@@ -1009,6 +1295,9 @@ func _enqueue_deck_prefetch(cards_array: Array) -> void:
 		for u in urls:
 			if CardManager.get_cached_image_texture(u) == null and not (u in _prefetch_urls):
 				_prefetch_urls.append(u)
+				_prefetch_total += 1
+	if engine and engine.hud_manager and engine.hud_manager.has_method("update_prefetch_progress"):
+		engine.hud_manager.update_prefetch_progress(_prefetch_done, _prefetch_total)
 	_pump_prefetch_queue()
 
 func _pump_prefetch_queue() -> void:
@@ -1024,8 +1313,13 @@ func _pump_prefetch_queue() -> void:
 			var r := instance_from_id(req_id)
 			if r and is_instance_valid(r): r.queue_free()
 			_prefetch_in_flight = maxi(0, _prefetch_in_flight - 1)
+			_prefetch_done += 1
 			if code == 200:
 				CardManager.store_image_to_cache(url, body)
+			if engine and engine.hud_manager and engine.hud_manager.has_method("update_prefetch_progress"):
+				engine.hud_manager.update_prefetch_progress(_prefetch_done, _prefetch_total)
+			if _prefetch_urls.is_empty() and _prefetch_in_flight == 0:
+				_prefetch_total = 0; _prefetch_done = 0
 			_pump_prefetch_queue()
 		)
 		http.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])

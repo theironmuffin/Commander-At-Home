@@ -17,6 +17,7 @@ const BELEREN_FONT = preload("res://Beleren.ttf")
 @onready var front_http_request: HTTPRequest = $FrontHTTPRequest
 @onready var collision_shape: CollisionShape3D = $CollisionShape3D
 
+var net_uid: int = 0
 var is_hovered: bool = false
 var is_interactive: bool = true
 var is_on_battlefield: bool = false
@@ -262,7 +263,7 @@ func refresh_visual_status() -> void:
 	_apply_parsed_keywords()
 	_refresh_keyword_flairs()
 	reset_dynamic_stats()
-	var is_creat := MagicRules.is_creature(card_data, active_face_index)
+	var is_creat := MagicRules.is_creature(card_data, active_face_index, self)
 	if is_creat and is_on_battlefield:
 		pt_badge_label.visible = true
 		pt_badge_label.text = "%d/%d" % [dynamic_power, dynamic_toughness]
@@ -299,10 +300,16 @@ func _input(event: InputEvent) -> void:
 			var mb := event as InputEventMouseButton
 			if not mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
 				var dy_rel: float = _mouse_down_pos.y - mb.position.y
+				var dist_rel: float = _mouse_down_pos.distance_to(mb.position)
 				_mouse_drag_active = false
 				if front_face: front_face.position.y = front_face_rest_pos.y
 				if not _hand_reordered and dy_rel >= 55.0:
 					card_played.emit(self)
+				elif not _hand_reordered and dist_rel < 16.0:
+					var main_node := get_tree().current_scene if get_tree() else null
+					var in_hand: bool = main_node != null and "hand_cards" in main_node and (self in main_node.hand_cards)
+					if not in_hand:
+						card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_LEFT)
 				get_viewport().set_input_as_handled()
 		return
 	if not _touch_active:
@@ -361,6 +368,11 @@ func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _nor
 				else:
 					if swipe_up >= 85.0:
 						card_played.emit(self)
+					elif moved < 28.0:
+						var main_node := get_tree().current_scene if get_tree() else null
+						var in_hand: bool = main_node != null and "hand_cards" in main_node and (self in main_node.hand_cards)
+						if not in_hand:
+							card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_LEFT)
 		return
 	elif event is InputEventScreenDrag:
 		var d_ev := event as InputEventScreenDrag
@@ -387,6 +399,11 @@ func _input_event(_camera: Camera3D, event: InputEvent, _position: Vector3, _nor
 				card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_RIGHT)
 			elif event.button_index == MOUSE_BUTTON_LEFT:
 				card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_LEFT)
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			var main_node := get_tree().current_scene if get_tree() else null
+			var in_hand: bool = main_node != null and "hand_cards" in main_node and (self in main_node.hand_cards)
+			if not in_hand:
+				card_clicked_on_battlefield.emit(self, MOUSE_BUTTON_RIGHT)
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			_mouse_drag_active = true
 			_hand_reordered = false
@@ -404,9 +421,13 @@ func set_playable_glow(active: bool) -> void:
 		shader_mat.set_shader_parameter("playable_sheen", active)
 
 func toggle_tap() -> void:
+	if attached_to != null and is_instance_valid(attached_to): return
 	if get_tree() and get_tree().current_scene and get_tree().current_scene.has_method("refresh_playable_card_glows"):
 		get_tree().current_scene.call_deferred("refresh_playable_card_glows")
+	var was_tapped := is_tapped
 	is_tapped = not is_tapped
+	if not was_tapped and is_tapped and is_on_battlefield and get_tree() and get_tree().current_scene and get_tree().current_scene.has_method("check_and_queue_triggers"):
+		get_tree().current_scene.check_and_queue_triggers("BECOMES_TAPPED", self)
 	var eb := get_node_or_null("/root/EventBus")
 	if eb and eb.has_method("play_sfx"):
 		eb.play_sfx("tap")
@@ -417,6 +438,7 @@ func toggle_tap() -> void:
 
 func make_active(data: Dictionary) -> void:
 	in_library = false
+	set_process(true)
 	setup(data)
 	if collision_shape: collision_shape.disabled = false
 
@@ -474,31 +496,21 @@ func _fetch_face_texture(face_idx: int) -> void:
 			card_texture_ready.emit(cached_tex)
 		return
 
-	if face_idx == 0 and front_http_request and front_http_request.get_http_client_status() == HTTPClient.STATUS_DISCONNECTED and is_inside_tree():
-		front_http_request.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])
-	else:
-		var tmp_http := HTTPRequest.new()
-		add_child(tmp_http)
-		var req_id := tmp_http.get_instance_id()
-		var card_id := get_instance_id()
-		tmp_http.request_completed.connect(func(_res, code, _hdr, body):
-			var r := instance_from_id(req_id)
-			if r and is_instance_valid(r): r.queue_free()
+	var card_id := get_instance_id()
+	if is_inside_tree() and CardManager.has_method("fetch_texture_deduped"):
+		CardManager.fetch_texture_deduped(url, func(tex: Texture2D):
 			var self_ref := instance_from_id(card_id)
-			if not (self_ref and is_instance_valid(self_ref)): return
-			if code == 200:
-				var tex: Texture2D = CardManager.store_image_to_cache(url, body)
-				if tex:
-					if face_idx == 1 and (MagicRules.is_transform(card_data) or MagicRules.is_modal_dfc(card_data)):
-						stored_back_texture = tex
-					else:
-						stored_front_texture = tex
-					if active_face_index == face_idx and not in_library and shader_mat:
-						shader_mat.set_shader_parameter("front_tex", tex)
-					card_texture_ready.emit(tex)
+			if not (self_ref and is_instance_valid(self_ref)) or tex == null: return
+			if face_idx == 1 and (MagicRules.is_transform(card_data) or MagicRules.is_modal_dfc(card_data)):
+				stored_back_texture = tex
+			else:
+				stored_front_texture = tex
+			if active_face_index == face_idx and not in_library and shader_mat:
+				shader_mat.set_shader_parameter("front_tex", tex)
+			card_texture_ready.emit(tex)
 		)
-		if is_inside_tree():
-			tmp_http.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])
+	elif face_idx == 0 and front_http_request and front_http_request.get_http_client_status() == HTTPClient.STATUS_DISCONNECTED and is_inside_tree():
+		front_http_request.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])
 
 func _apply_parsed_keywords() -> void:
 	if has_keyword("haste"): has_summoning_sickness = false
@@ -594,6 +606,8 @@ func modify_named_counter(counter_type: String, delta: int) -> void:
 		custom_counters.erase(key)
 	else:
 		custom_counters[key] = next_val
+	if key == "loyalty" and get_tree() and get_tree().current_scene and get_tree().current_scene.has_method("refresh_playable_card_glows"):
+		get_tree().current_scene.call_deferred("refresh_playable_card_glows")
 	_refresh_counter_label()
 
 func get_named_counter(counter_type: String) -> int:
@@ -634,15 +648,41 @@ func clear_counters() -> void:
 
 func mark_as_token() -> void:
 	is_token = true
+	var t_name := str(card_data.get("name", "Token")).to_lower()
+	var t_type := MagicRules.get_card_type_line(card_data).to_lower()
+	var badge_col := Color(0.4, 0.7, 1.0, 1)
+	var tint_col := Color(0.18, 0.22, 0.30, 1.0)
+	if "treasure" in t_name:
+		badge_col = Color(1.0, 0.84, 0.28, 1.0); tint_col = Color(0.42, 0.31, 0.08, 1.0)
+	elif "clue" in t_name:
+		badge_col = Color(0.45, 0.88, 0.96, 1.0); tint_col = Color(0.12, 0.26, 0.34, 1.0)
+	elif "food" in t_name:
+		badge_col = Color(0.68, 0.94, 0.42, 1.0); tint_col = Color(0.20, 0.32, 0.12, 1.0)
+	elif "map" in t_name:
+		badge_col = Color(0.92, 0.78, 0.52, 1.0); tint_col = Color(0.32, 0.24, 0.14, 1.0)
+	elif "blood" in t_name:
+		badge_col = Color(0.96, 0.30, 0.32, 1.0); tint_col = Color(0.34, 0.08, 0.10, 1.0)
+	elif "jace" in t_name and "planeswalker" in t_type:
+		badge_col = Color(0.42, 0.74, 1.0, 1.0); tint_col = Color(0.10, 0.22, 0.42, 1.0)
 	if token_label == null:
 		token_label = Label3D.new()
 		token_label.name = "TokenLabel"
-		token_label.position = Vector3(0.0, 0.05, -0.35)
+		token_label.position = Vector3(0.0, 0.05, -0.14)
 		token_label.rotation_degrees = Vector3(-90, 0, 0)
-		token_label.font_size = 40; token_label.outline_size = 20
-		token_label.text = "TOKEN"; token_label.modulate = Color(0.4, 0.7, 1.0, 1)
+		token_label.font_size = 22; token_label.outline_size = 10
 		if BELEREN_FONT: token_label.font = BELEREN_FONT
 		front_face.add_child(token_label)
+	token_label.position = Vector3(0.0, 0.05, -0.14)
+	token_label.font_size = 22
+	token_label.outline_size = 10
+	token_label.text = "TOKEN"
+	token_label.modulate = badge_col
+	if front_face and str(card_data.get("image_url", "")).is_empty():
+		var f_mat := front_face.get_surface_override_material(0)
+		if f_mat is StandardMaterial3D:
+			(f_mat as StandardMaterial3D).albedo_color = tint_col
+	if pt_badge_label and not ("creature" in t_type) and not ("planeswalker" in t_type):
+		pt_badge_label.visible = false
 
 func _on_phase_changed_trigger(new_phase: int) -> void:
 	if not is_on_battlefield: return
@@ -695,6 +735,9 @@ func play_damage_flash() -> void:
 		damage_shake_tween.tween_property(front_face, "position:x", front_face_rest_pos.x, 0.05)
 
 func _process(delta: float) -> void:
+	if in_library and not _touch_active:
+		set_process(false)
+		return
 	if _touch_active and not _long_press_fired and Time.get_ticks_msec() - _touch_down_time_ms >= 420:
 		_long_press_fired = true
 		_touch_active = false
@@ -749,35 +792,72 @@ func _setup_flair_root() -> void:
 	_flair_root.name = "KeywordFlairs"
 	front_face.add_child(_flair_root)
 
+static var _AURA_SHADER: Shader = null
+static var _MOTE_SHADER: Shader = null
+
+static func _get_aura_shader() -> Shader:
+	if _AURA_SHADER == null:
+		_AURA_SHADER = Shader.new()
+		_AURA_SHADER.code = """shader_type spatial;
+render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+uniform vec4 aura_color : source_color = vec4(1.0, 0.8, 0.3, 0.6);
+uniform float pulse_speed = 1.6;
+uniform float wave_freq = 4.0;
+uniform float edge_softness = 0.20;
+void fragment() {
+	vec2 p = abs(UV - vec2(0.5)) * 2.0;
+	float box_d = max(p.x, p.y);
+	float outer_fade = 1.0 - smoothstep(1.0 - edge_softness, 1.0, box_d);
+	float inner_fade = smoothstep(0.52, 0.86, box_d);
+	float rim = outer_fade * inner_fade;
+	float ang = atan(UV.y - 0.5, UV.x - 0.5);
+	float wave = 0.72 + 0.28 * sin(ang * wave_freq + TIME * pulse_speed * 2.2);
+	float breathe = 0.80 + 0.20 * sin(TIME * pulse_speed);
+	ALBEDO = aura_color.rgb * (1.1 + 0.35 * wave);
+	ALPHA = clamp(rim * aura_color.a * wave * breathe, 0.0, 1.0);
+}"""
+	return _AURA_SHADER
+
+static func _get_mote_shader() -> Shader:
+	if _MOTE_SHADER == null:
+		_MOTE_SHADER = Shader.new()
+		_MOTE_SHADER.code = """shader_type spatial;
+render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+uniform vec4 mote_color : source_color = vec4(1.0, 0.6, 0.2, 0.9);
+void fragment() {
+	float d = length(UV - vec2(0.5)) * 2.0;
+	float glow = exp(-d * d * 3.8) * (1.0 - smoothstep(0.75, 1.0, d));
+	ALBEDO = mote_color.rgb * 1.4;
+	ALPHA = clamp(glow * mote_color.a, 0.0, 1.0);
+}"""
+	return _MOTE_SHADER
+
 func _add_flair_mote(col: Color, radius: float, mode: String, speed: float, offset: float, rx: float = 0.34, rz: float = 0.46, y: float = 0.04) -> void:
 	var mi := MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = radius
-	sm.height = radius * 2.0
-	sm.radial_segments = 8
-	sm.rings = 4
-	mi.mesh = sm
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = col
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var qm := QuadMesh.new()
+	qm.size = Vector2(radius * 3.4, radius * 3.4)
+	mi.mesh = qm
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_mote_shader()
+	mat.set_shader_parameter("mote_color", col)
 	mi.material_override = mat
+	mi.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
 	mi.position = Vector3(rx, y, 0.0)
 	_flair_root.add_child(mi)
 	_flair_items.append({"node": mi, "mode": mode, "speed": speed, "offset": offset, "rx": rx, "rz": rz, "y": y, "amp": 0.15})
 
-func _add_flair_ring(col: Color, size: Vector2, y: float, mode: String, speed: float, amp: float = 0.06) -> void:
+func _add_flair_ring(col: Color, size: Vector2, y: float, mode: String, speed: float, amp: float = 0.04, wave_freq: float = 4.0) -> void:
 	var mi := MeshInstance3D.new()
 	var qm := QuadMesh.new()
-	qm.size = size
+	qm.size = size * 1.12
 	mi.mesh = qm
 	mi.position = Vector3(0.0, y, 0.0)
 	mi.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = col
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_aura_shader()
+	mat.set_shader_parameter("aura_color", col)
+	mat.set_shader_parameter("pulse_speed", speed)
+	mat.set_shader_parameter("wave_freq", wave_freq)
 	mi.material_override = mat
 	_flair_root.add_child(mi)
 	_flair_items.append({"node": mi, "mode": mode, "speed": speed, "offset": 0.0, "rx": 0.0, "rz": 0.0, "y": y, "amp": amp})
@@ -801,15 +881,18 @@ func _add_flair_torus(col: Color, inner_r: float, outer_r: float, y: float, spee
 	var tm := TorusMesh.new()
 	tm.inner_radius = inner_r
 	tm.outer_radius = outer_r
-	tm.rings = 16
-	tm.ring_segments = 8
+	tm.rings = 20
+	tm.ring_segments = 10
 	mi.mesh = tm
 	mi.position = Vector3(0.0, y, -0.25)
 	mi.rotation_degrees = Vector3(65.0, 0.0, 0.0)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = col
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.emission_enabled = true
+	mat.emission = col
+	mat.emission_energy_multiplier = 0.65
+	mat.metallic = 0.75
+	mat.roughness = 0.20
 	mi.material_override = mat
 	_flair_root.add_child(mi)
 	_flair_items.append({"node": mi, "mode": "spin", "speed": speed, "offset": 0.0, "rx": 0.0, "rz": 0.0, "y": y, "amp": 0.0})
@@ -829,7 +912,7 @@ func _refresh_keyword_flairs() -> void:
 	for kw in ["flying", "first strike", "double strike", "deathtouch", "trample", "vigilance", "lifelink", "haste", "reach", "indestructible", "hexproof", "shroud", "ward", "menace", "flash", "defender"]:
 		if has_keyword(kw):
 			kws.append(kw)
-	var is_creat := MagicRules.is_creature(card_data, active_face_index)
+	var is_creat := MagicRules.is_creature(card_data, active_face_index, self)
 	var is_sick := is_on_battlefield and is_creat and has_summoning_sickness and not has_keyword("haste")
 	var is_goaded := is_on_battlefield and goaded_by_player_id > 0
 	var prot_arr: Array = parsed_abilities.get("protection_from", [])
@@ -845,67 +928,68 @@ func _refresh_keyword_flairs() -> void:
 	_flair_items.clear()
 
 	if has_gy_play and not is_on_battlefield:
-		_add_flair_ring(Color(0.30, 0.95, 0.85, 0.25), Vector2(0.71, 0.96), -0.004, "pulse", 1.6, 0.04)
+		_add_flair_ring(Color(0.25, 0.95, 0.85, 0.55), Vector2(0.72, 0.97), -0.004, "pulse", 1.5, 0.025, 3.0)
 		return
 
-	# Keyword Auras & Accents
+	# Soft Feathered Keyword Auras & Creative Particle Accents
 	if "indestructible" in kws:
-		_add_flair_ring(Color(1.0, 0.84, 0.25, 0.28), Vector2(0.73, 0.98), -0.008, "pulse", 1.1, 0.03)
+		_add_flair_ring(Color(1.0, 0.84, 0.25, 0.65), Vector2(0.74, 0.99), -0.006, "pulse", 1.1, 0.02, 6.0)
 	if "hexproof" in kws or "shroud" in kws or "ward" in kws:
-		_add_flair_ring(Color(0.35, 0.85, 1.0, 0.22), Vector2(0.74, 0.99), -0.006, "pulse", 1.4, 0.05)
+		_add_flair_ring(Color(0.32, 0.86, 1.0, 0.58), Vector2(0.75, 1.00), -0.005, "pulse", 1.6, 0.025, 8.0)
 	if "vigilance" in kws:
-		_add_flair_ring(Color(0.95, 0.96, 1.0, 0.20), Vector2(0.71, 0.96), -0.005, "pulse", 0.9, 0.025)
+		_add_flair_ring(Color(0.96, 0.96, 0.86, 0.45), Vector2(0.72, 0.97), -0.004, "pulse", 0.9, 0.015, 2.0)
 	if "defender" in kws:
-		_add_flair_ring(Color(0.55, 0.65, 0.78, 0.24), Vector2(0.72, 0.97), -0.005, "pulse", 0.6, 0.015)
+		_add_flair_ring(Color(0.55, 0.68, 0.85, 0.48), Vector2(0.73, 0.98), -0.004, "pulse", 0.6, 0.01, 4.0)
 	if "flying" in kws:
-		_add_flair_ring(Color(0.55, 0.85, 1.0, 0.16), Vector2(0.68, 0.92), -0.03, "pulse", 1.8, 0.06)
+		_add_flair_ring(Color(0.55, 0.85, 1.0, 0.40), Vector2(0.70, 0.94), -0.03, "pulse", 1.8, 0.035, 3.0)
 	if "trample" in kws:
-		_add_flair_ring(Color(0.95, 0.35, 0.15, 0.22), Vector2(0.75, 1.00), -0.01, "pulse", 2.0, 0.08)
+		_add_flair_ring(Color(1.0, 0.38, 0.12, 0.58), Vector2(0.76, 1.01), -0.008, "pulse", 2.2, 0.04, 5.0)
 
 	if "haste" in kws:
-		_add_flair_mote(Color(1.0, 0.38, 0.12, 0.92), 0.028, "orbit", 2.8, 0.0, 0.36, 0.48, 0.04)
-		_add_flair_mote(Color(1.0, 0.65, 0.20, 0.85), 0.022, "orbit", 2.8, PI, 0.36, 0.48, 0.04)
+		_add_flair_mote(Color(1.0, 0.42, 0.12, 0.95), 0.030, "orbit", 3.0, 0.0, 0.36, 0.48, 0.04)
+		_add_flair_mote(Color(1.0, 0.72, 0.22, 0.88), 0.024, "orbit", 3.0, PI * 0.66, 0.36, 0.48, 0.04)
+		_add_flair_mote(Color(1.0, 0.52, 0.16, 0.85), 0.020, "orbit", 3.0, PI * 1.33, 0.36, 0.48, 0.04)
 	if "deathtouch" in kws:
-		_add_flair_mote(Color(0.25, 0.95, 0.38, 0.90), 0.026, "orbit", 1.1, 0.5, 0.34, 0.46, 0.03)
-		_add_flair_mote(Color(0.65, 0.25, 0.95, 0.85), 0.022, "orbit", 1.1, 0.5 + PI, 0.34, 0.46, 0.03)
+		_add_flair_mote(Color(0.25, 0.96, 0.38, 0.90), 0.028, "orbit", 1.2, 0.5, 0.34, 0.46, 0.035)
+		_add_flair_mote(Color(0.68, 0.25, 0.96, 0.88), 0.024, "orbit", 1.2, 0.5 + PI, 0.34, 0.46, 0.035)
 	if "lifelink" in kws:
-		_add_flair_mote(Color(1.0, 0.72, 0.85, 0.92), 0.024, "orbit", 1.3, 1.0, 0.32, 0.44, 0.06)
-		_add_flair_mote(Color(1.0, 0.92, 0.55, 0.88), 0.020, "orbit", 1.3, 1.0 + PI, 0.32, 0.44, 0.06)
+		_add_flair_mote(Color(1.0, 0.76, 0.88, 0.92), 0.026, "orbit", 1.35, 1.0, 0.32, 0.44, 0.06)
+		_add_flair_mote(Color(1.0, 0.94, 0.62, 0.90), 0.022, "orbit", 1.35, 1.0 + PI, 0.32, 0.44, 0.06)
 	if "double strike" in kws:
 		_add_flair_blade(Color(1.0, 0.85, 0.25, 0.95), 0.0)
 		_add_flair_blade(Color(1.0, 0.96, 0.65, 0.95), PI)
 	elif "first strike" in kws:
 		_add_flair_blade(Color(1.0, 0.82, 0.25, 0.92), 0.0)
 	if "menace" in kws:
-		_add_flair_mote(Color(0.95, 0.12, 0.18, 0.90), 0.030, "glint", 1.9, 0.0, 0.31, 0.43, 0.05)
-		_add_flair_mote(Color(0.95, 0.12, 0.18, 0.90), 0.030, "glint", 1.9, PI, -0.31, 0.43, 0.05)
+		_add_flair_mote(Color(1.0, 0.14, 0.18, 0.92), 0.030, "glint", 2.0, 0.0, 0.31, 0.43, 0.05)
+		_add_flair_mote(Color(1.0, 0.14, 0.18, 0.92), 0.030, "glint", 2.0, PI, -0.31, 0.43, 0.05)
 	if "reach" in kws:
-		_add_flair_mote(Color(0.25, 0.90, 0.65, 0.85), 0.022, "glint", 1.5, 0.7, 0.0, -0.46, 0.08)
+		_add_flair_mote(Color(0.28, 0.94, 0.68, 0.90), 0.026, "glint", 1.6, 0.7, 0.0, -0.46, 0.08)
 	if "flash" in kws:
-		_add_flair_mote(Color(0.35, 0.92, 1.0, 0.95), 0.025, "glint", 3.2, 0.0, 0.28, -0.42, 0.06)
+		_add_flair_mote(Color(0.38, 0.94, 1.0, 0.95), 0.028, "glint", 3.4, 0.0, 0.28, -0.42, 0.06)
 
-	# Creature Status Animations (replacing 3D text badges)
+	# Creature Status Animations
 	if is_sick:
-		_add_flair_mote(Color(0.68, 0.75, 1.0, 0.55), 0.024, "orbit", 0.65, 0.0, 0.22, 0.32, 0.08)
-		_add_flair_mote(Color(0.55, 0.62, 0.95, 0.45), 0.018, "orbit", 0.65, PI, 0.22, 0.32, 0.11)
+		_add_flair_mote(Color(0.65, 0.74, 1.0, 0.62), 0.024, "orbit", 0.65, 0.0, 0.22, 0.32, 0.08)
+		_add_flair_mote(Color(0.52, 0.62, 0.96, 0.52), 0.018, "orbit", 0.65, PI, 0.22, 0.32, 0.11)
 	if is_goaded:
-		_add_flair_ring(Color(1.0, 0.18, 0.12, 0.30), Vector2(0.76, 1.01), -0.004, "pulse", 3.2, 0.09)
+		_add_flair_ring(Color(1.0, 0.18, 0.12, 0.68), Vector2(0.76, 1.01), -0.004, "pulse", 3.2, 0.04, 6.0)
 	if has_prot:
-		_add_flair_ring(Color(0.85, 0.95, 1.0, 0.28), Vector2(0.75, 1.00), -0.003, "pulse", 1.5, 0.04)
+		_add_flair_ring(Color(0.88, 0.96, 1.0, 0.58), Vector2(0.75, 1.00), -0.003, "pulse", 1.5, 0.02, 5.0)
 	if has_custom_status("Ring-bearer"):
 		_add_flair_torus(Color(1.0, 0.84, 0.22, 0.95), 0.08, 0.12, 0.14, 1.4)
 	if has_custom_status("Renowned"):
-		_add_flair_mote(Color(1.0, 0.92, 0.45, 0.95), 0.024, "orbit", 1.2, 0.0, 0.26, 0.38, 0.10)
-		_add_flair_mote(Color(1.0, 0.98, 0.85, 0.90), 0.020, "orbit", 1.2, PI, 0.26, 0.38, 0.10)
+		_add_flair_mote(Color(1.0, 0.92, 0.45, 0.95), 0.026, "orbit", 1.2, 0.0, 0.26, 0.38, 0.10)
+		_add_flair_mote(Color(1.0, 0.98, 0.85, 0.90), 0.022, "orbit", 1.2, PI, 0.26, 0.38, 0.10)
 	if has_custom_status("Monstrous"):
-		_add_flair_ring(Color(0.65, 0.12, 0.55, 0.28), Vector2(0.78, 1.03), -0.006, "pulse", 1.8, 0.07)
+		_add_flair_ring(Color(0.78, 0.18, 0.65, 0.62), Vector2(0.78, 1.03), -0.006, "pulse", 1.8, 0.035, 5.0)
 		_flair_items.append({"node": front_face, "mode": "breathe", "speed": 1.3, "offset": 0.0, "rx": 0.0, "rz": 0.0, "y": 0.0, "amp": 0.035})
 	if has_custom_status("Suspected"):
-		_add_flair_ring(Color(1.0, 0.72, 0.15, 0.24), Vector2(0.72, 0.97), -0.004, "pulse", 2.1, 0.05)
-		_add_flair_mote(Color(1.0, 0.80, 0.20, 0.92), 0.026, "glint", 2.4, 0.0, 0.0, -0.35, 0.10)
+		_add_flair_ring(Color(1.0, 0.72, 0.15, 0.55), Vector2(0.72, 0.97), -0.004, "pulse", 2.1, 0.025, 4.0)
+		_add_flair_mote(Color(1.0, 0.80, 0.20, 0.92), 0.028, "glint", 2.4, 0.0, 0.0, -0.35, 0.10)
 	if has_custom_status("Saddled"):
-		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.022, "glint", 1.4, 0.0, -0.30, 0.0, 0.05)
-		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.022, "glint", 1.4, 0.0, 0.30, 0.0, 0.05)
+		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.024, "glint", 1.4, 0.0, -0.30, 0.0, 0.05)
+		_add_flair_mote(Color(0.35, 0.88, 0.48, 0.88), 0.024, "glint", 1.4, 0.0, 0.30, 0.0, 0.05)
 
 func toggle_custom_status(status_name: String) -> void:
 	var key := status_name.strip_edges()

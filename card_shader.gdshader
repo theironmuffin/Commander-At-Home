@@ -37,11 +37,13 @@ void fragment() {
 		float mask = clamp(0.18 + 0.42 * view_ang + 0.25 * shimmer, 0.0, 0.65) * foil_amount;
 		final_col = mix(final_col, final_col * 0.88 + holo * 0.48, mask);
 		emit_col += holo * (0.14 * shimmer + 0.12 * view_ang) * foil_amount;
-		ROUGHNESS = mix(0.45, 0.14, foil_amount);
+		ROUGHNESS = mix(0.86, 0.14, foil_amount);
 		METALLIC = mix(0.0, 0.42, foil_amount);
+		SPECULAR = mix(0.14, 0.65, foil_amount);
 	} else {
-		ROUGHNESS = 0.45;
+		ROUGHNESS = 0.86;
 		METALLIC = 0.0;
+		SPECULAR = 0.14;
 	}
 
 	if (playable_sheen && FRONT_FACING) {

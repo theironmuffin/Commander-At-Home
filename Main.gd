@@ -4,6 +4,13 @@ const CARD_SCENE_PRELOAD = preload("res://Card3D.tscn")
 @export var CardScene: PackedScene = CARD_SCENE_PRELOAD
 
 const BELEREN_FONT = preload("res://Beleren.ttf")
+var MUSTICA_FONT: Font = ResourceLoader.load("res://MusticaPro-SemiBold.otf") if ResourceLoader.exists("res://MusticaPro-SemiBold.otf") else BELEREN_FONT
+var ui_font_mode: String = "mustica"
+
+func get_active_ui_font() -> Font:
+	if ui_font_mode == "beleren":
+		return BELEREN_FONT
+	return MUSTICA_FONT if MUSTICA_FONT != null else BELEREN_FONT
 const UI_BACKGROUND = Color(0.1, 0.1, 0.13, 0.9)
 const UI_BORDER = Color(0.85, 0.7, 0.35, 0.8)
 
@@ -116,6 +123,7 @@ var undo_stack: Array[Dictionary] = []
 const SAVE_GAME_PATH = "user://savegame.json"
 var _legend_rule_pending: bool = false
 var eliminated_players: Dictionary = {}
+var drawn_from_empty_library: Dictionary = {1: false, 2: false, 3: false, 4: false}
 var game_over_shown: bool = false
 var player_counters: Dictionary = {1: {}, 2: {}, 3: {}, 4: {}}
 var player_statuses: Dictionary = {1: [], 2: [], 3: [], 4: []}
@@ -194,9 +202,15 @@ func _ready() -> void:
 	setup_tabletop_layout()
 	_load_table_settings()
 	apply_playmat_theme(current_playmat_theme)
+	_setup_room_environment()
 
-	if OS.get_name() == "Android":
+	if OS.get_name() in ["Android", "iOS"]:
 		Input.set_use_accumulated_input(true)
+		Engine.max_fps = 60
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED)
+		if get_viewport():
+			get_viewport().msaa_3d = Viewport.MSAA_DISABLED
+			get_viewport().scaling_3d_scale = 0.85
 	_load_player_sleeves()
 	_load_player_playmats()
 	_setup_zone_anchors()
@@ -208,11 +222,15 @@ func _ready() -> void:
 	EventBus.damage_dealt.connect(_on_damage_dealt_triggers)
 	EventBus.life_total_changed.connect(func(p, _n, delta):
 		refresh_command_info_stations()
-		if delta != 0: spawn_floating_3d_text(p, "%+d" % delta, Color(0.35, 0.95, 0.45) if delta > 0 else Color(1.0, 0.32, 0.32))
+		if not suppress_combat_damage_popups and delta != 0: spawn_floating_3d_text(p, "%+d" % delta, Color(0.35, 0.95, 0.45) if delta > 0 else Color(1.0, 0.32, 0.32))
 	)
-	EventBus.damage_dealt.connect(func(_s, t, amt):
+	EventBus.damage_dealt.connect(func(s, t, amt):
+		if amt > 0 and t is int:
+			players_damaged_this_turn[int(t)] = true
+		if amt > 0 and s is Node3D and is_instance_valid(s):
+			record_match_stat(get_card_owner_id(s), "damage_dealt", amt)
 		refresh_command_info_stations()
-		if amt > 0 and t is Node3D and is_instance_valid(t):
+		if not suppress_combat_damage_popups and amt > 0 and (t is int or (t is Node3D and is_instance_valid(t))):
 			spawn_floating_3d_text(t, "-%d" % amt, Color(1.0, 0.35, 0.25))
 			if amt >= 3:
 				spawn_impact_vfx((t as Node3D).global_position, Color(1.0, 0.45, 0.15), 0.85)
@@ -248,9 +266,27 @@ static func _initialize_regex_cache() -> void:
 		EQUIP_COST_REGEX = RegEx.new()
 		EQUIP_COST_REGEX.compile("Equip\\s*(\\{[^\\}]+\\}+)")
 
+var _next_net_uid: int = 1000
+var _trigger_fire_counts_this_turn: Dictionary = {}
+var _trigger_last_turn: int = -1
+
 func _instantiate_card() -> Node3D:
 	var scene_to_spawn: PackedScene = CardScene if CardScene != null else CARD_SCENE_PRELOAD
-	return scene_to_spawn.instantiate()
+	var c: Node3D = scene_to_spawn.instantiate()
+	_next_net_uid += 1
+	if "net_uid" in c: c.net_uid = _next_net_uid
+	return c
+
+func cache_custom_image_locally(src_path: String, prefix: String = "img") -> String:
+	if src_path.is_empty() or src_path.begins_with("user://custom_cache/"):
+		return src_path
+	var img := Image.load_from_file(src_path)
+	if img and not img.is_empty():
+		DirAccess.make_dir_recursive_absolute("user://custom_cache")
+		var out_path := "user://custom_cache/%s_%d.png" % [prefix, absi(src_path.hash())]
+		if img.save_png(out_path) == OK:
+			return out_path
+	return src_path
 
 func reset_game_and_reselect_decks() -> void:
 	if hud_manager:
@@ -499,8 +535,8 @@ func _get_default_player_playmat_texture() -> Texture2D:
 					img.set_pixel(x, y, Color(base_r, base_g, base_b, 1.0))
 			else:
 				# Subtle center ring emblem
-				var dx := float(x - w / 2)
-				var dy := float(y - h / 2)
+				var dx := float(x) - float(w) * 0.5
+				var dy := float(y) - float(h) * 0.5
 				var rad := sqrt(dx * dx + dy * dy)
 				if absf(rad - 54.0) < 1.6 or absf(rad - 42.0) < 1.1:
 					img.set_pixel(x, y, Color(0.28, 0.25, 0.20, 1.0))
@@ -624,9 +660,29 @@ func _setup_targeting_arcs() -> void:
 func _process(delta: float) -> void:
 	_update_controller_cursor(delta)
 	_update_targeting_arcs()
+	if _active_table_mat != null:
+		_surface_anim_t += delta
+		if current_playmat_theme == "ocean":
+			_active_table_mat.uv1_offset = Vector3(sin(_surface_anim_t * 0.35) * 0.035, _surface_anim_t * 0.015, 0.0)
+			_active_table_mat.roughness = 0.16 + 0.04 * sin(_surface_anim_t * 1.4)
+		elif current_playmat_theme == "starfield":
+			_active_table_mat.emission_enabled = true
+			_active_table_mat.emission = Color(0.22, 0.30, 0.56)
+			_active_table_mat.emission_energy_multiplier = 0.18 + 0.10 * sin(_surface_anim_t * 2.1)
 
 func _update_targeting_arcs() -> void:
 	if not targeting_arcs_mesh: return
+	var any_active: bool = not active_stack.is_empty()
+	if not any_active:
+		for c in battlefield_non_lands:
+			if is_instance_valid(c) and (bool(c.get("is_attacking")) or bool(c.get("is_blocking"))):
+				any_active = true; break
+	if not any_active:
+		if _had_arcs_last_frame:
+			targeting_arcs_mesh.clear_surfaces()
+			_had_arcs_last_frame = false
+		return
+	_had_arcs_last_frame = true
 	targeting_arcs_mesh.clear_surfaces()
 
 	var arcs: Array = []
@@ -635,17 +691,25 @@ func _update_targeting_arcs() -> void:
 	for item in active_stack:
 		var src_node: Node3D = null
 		var tgt_val: Variant = null
+		var eff_txt := ""
 		if item is Node3D and is_instance_valid(item):
 			src_node = item
 			if item.has_meta("chosen_target"): tgt_val = item.get_meta("chosen_target")
+			eff_txt = str(MagicRules.get_card_attribute(item.card_data, "oracle_text", "")).to_lower()
 		else:
 			src_node = item.source_card if is_instance_valid(item.source_card) else null
 			tgt_val = item.target_ref
+			eff_txt = str(item.effect_text).to_lower()
 
 		if src_node and is_instance_valid(src_node) and tgt_val != null:
 			var end_pos: Variant = _resolve_target_world_pos(tgt_val)
 			if end_pos is Vector3:
-				arcs.append({"start": src_node.global_position, "end": end_pos, "color": Color(0.3, 0.88, 1.0, 0.95), "height": 0.9})
+				var arc_col := Color(0.30, 0.88, 1.0, 0.95)
+				if "damage" in eff_txt or "destroy" in eff_txt or "exile" in eff_txt or "sacrifice" in eff_txt or "counter target" in eff_txt or "-1/-1" in eff_txt or "loses " in eff_txt or "mill" in eff_txt:
+					arc_col = Color(0.98, 0.22, 0.22, 0.95) # Red: negative targeting
+				elif "attach" in eff_txt or "equip" in eff_txt or "gain" in eff_txt or "+1/+1" in eff_txt or "untap" in eff_txt or "hexproof" in eff_txt or "indestructible" in eff_txt or "draw" in eff_txt:
+					arc_col = Color(0.24, 0.92, 0.42, 0.95) # Green: positive targeting
+				arcs.append({"start": src_node.global_position, "end": end_pos, "color": arc_col, "height": 0.9})
 
 	# 2. Attacking & Blocking Creatures -> Combat Targets
 	for card in battlefield_non_lands:
@@ -654,39 +718,64 @@ func _update_targeting_arcs() -> void:
 			var pid: int = int(card.get("attacking_target_player_id"))
 			var end_pos: Variant = _resolve_target_world_pos(pid)
 			if end_pos is Vector3:
-				arcs.append({"start": card.global_position, "end": end_pos, "color": Color(1.0, 0.28, 0.25, 0.9), "height": 0.75})
+				arcs.append({"start": card.global_position, "end": end_pos, "color": Color(1.0, 0.52, 0.10, 0.95), "height": 0.75}) # Orange: attacking
 		if bool(card.get("is_blocking")) and card.get("blocking_target_creature") != null:
 			var atk: Node3D = card.get("blocking_target_creature")
 			if is_instance_valid(atk):
-				arcs.append({"start": card.global_position, "end": atk.global_position, "color": Color(0.35, 0.65, 1.0, 0.9), "height": 0.55})
+				arcs.append({"start": card.global_position, "end": atk.global_position, "color": Color(1.0, 0.88, 0.18, 0.95), "height": 0.55}) # Yellow: blocking
 
 	if arcs.is_empty(): return
 
 	targeting_arcs_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 	const SEGMENTS := 18
-	const HALF_WIDTH := 0.042
+	const RING_SIDES := 6
+	const START_RADIUS := 0.085
+	const END_RADIUS := 0.004
 	for arc in arcs:
-		var p0: Vector3 = arc["start"] + Vector3(0.0, 0.05, 0.0)
-		var p1: Vector3 = arc["end"] + Vector3(0.0, 0.05, 0.0)
+		var p0: Vector3 = arc["start"] + Vector3(0.0, 0.06, 0.0)
+		var p1: Vector3 = arc["end"] + Vector3(0.0, 0.06, 0.0)
 		var col: Color = arc["color"]
 		var h: float = arc["height"]
-		for s in range(SEGMENTS):
-			var t0 := float(s) / float(SEGMENTS)
-			var t1 := float(s + 1) / float(SEGMENTS)
-			var a := p0.lerp(p1, t0) + Vector3(0.0, sin(t0 * PI) * h, 0.0)
-			var b := p0.lerp(p1, t1) + Vector3(0.0, sin(t1 * PI) * h, 0.0)
-			var dir := (b - a)
-			if dir.length_squared() < 0.00001: continue
-			var side := dir.normalized().cross(Vector3.UP)
-			if side.length_squared() < 0.001: side = Vector3.RIGHT
-			side = side.normalized() * HALF_WIDTH
-			var a0 := a - side
-			var a1 := a + side
-			var b0 := b - side
-			var b1 := b + side
-			for v in [a0, a1, b0, a1, b1, b0]:
+		var ring_pts: Array[Array] = []
+		var ring_centers: Array[Vector3] = []
+		for s in range(SEGMENTS + 1):
+			var t := float(s) / float(SEGMENTS)
+			var pos := p0.lerp(p1, t) + Vector3(0.0, sin(t * PI) * h, 0.0)
+			var t_n := minf(1.0, t + 0.02)
+			var t_p := maxf(0.0, t - 0.02)
+			var pos_n := p0.lerp(p1, t_n) + Vector3(0.0, sin(t_n * PI) * h, 0.0)
+			var pos_p := p0.lerp(p1, t_p) + Vector3(0.0, sin(t_p * PI) * h, 0.0)
+			var fwd := (pos_n - pos_p)
+			if fwd.length_squared() < 0.00001: fwd = Vector3.FORWARD
+			fwd = fwd.normalized()
+			var right := fwd.cross(Vector3.UP)
+			if right.length_squared() < 0.001: right = fwd.cross(Vector3.RIGHT)
+			right = right.normalized()
+			var up_perp := right.cross(fwd).normalized()
+			var rad := lerpf(START_RADIUS, END_RADIUS, t)
+			var pts: Array[Vector3] = []
+			for k in range(RING_SIDES):
+				var ang := float(k) * TAU / float(RING_SIDES)
+				pts.append(pos + (right * cos(ang) + up_perp * sin(ang)) * rad)
+			ring_pts.append(pts)
+			ring_centers.append(pos)
+		# Cap wide base at source
+		var base_ring: Array = ring_pts[0]
+		var base_c: Vector3 = ring_centers[0]
+		for k in range(RING_SIDES):
+			var kn := (k + 1) % RING_SIDES
+			for v in [base_c, base_ring[kn], base_ring[k]]:
 				targeting_arcs_mesh.surface_set_color(col)
 				targeting_arcs_mesh.surface_add_vertex(v)
+		# Extrude tapered cone segments
+		for s in range(SEGMENTS):
+			var r0: Array = ring_pts[s]
+			var r1: Array = ring_pts[s + 1]
+			for k in range(RING_SIDES):
+				var kn := (k + 1) % RING_SIDES
+				for v in [r0[k], r0[kn], r1[k], r0[kn], r1[kn], r1[k]]:
+					targeting_arcs_mesh.surface_set_color(col)
+					targeting_arcs_mesh.surface_add_vertex(v)
 	targeting_arcs_mesh.surface_end()
 
 func _resolve_target_world_pos(target_val: Variant) -> Variant:
@@ -888,6 +977,19 @@ func _setup_command_info_stations() -> void:
 			if hud_manager and hud_manager.has_method("hide_player_station_preview"):
 				hud_manager.hide_player_station_preview()
 		)
+		hover_area.input_event.connect(func(_cam, event, _pos, _norm, _shape):
+			var is_tap: bool = (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and event.device != -1) or (event is InputEventScreenTouch and event.pressed)
+			if not is_tap: return
+			if hud_manager and hud_manager.active_target_callback.is_valid():
+				if not is_player_eliminated(pid_cap):
+					hud_manager.select_target(pid_cap)
+				return
+			if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and turn_manager.is_local_player_turn():
+				if combat_manager and combat_manager.pending_attacker != null and pid_cap != local_player_id:
+					if combat_manager.assign_attacker_target(combat_manager.pending_attacker, pid_cap):
+						if hud_manager: hud_manager.show_toast("Attacking %s" % get_player_display_name(pid_cap), Color(0.95, 0.78, 0.35, 1.0))
+						sync_network_state()
+		)
 
 		var name_lbl := Label3D.new()
 		if BELEREN_FONT: name_lbl.font = BELEREN_FONT
@@ -935,8 +1037,20 @@ func _setup_command_info_stations() -> void:
 		command_info_stations[pid] = {"root": root, "name": name_lbl, "life": life_lbl, "cmd": cmd_lbl, "status": st_lbl, "border_mat": b_mat}
 
 const TABLE_SETTINGS_PATH := "user://table_settings.json"
-const TABLE_SURFACES := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment"]
+const TABLE_SURFACES := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment", "marble", "frosted_glass", "grassy_field", "sand", "dirt", "ocean"]
 var current_playmat_theme: String = "classic_felt"
+var _active_table_mat: StandardMaterial3D = null
+var _surface_anim_t: float = 0.0
+var suppress_combat_damage_popups: bool = false
+var _had_arcs_last_frame: bool = false
+var players_damaged_this_turn: Dictionary = {}
+var eot_mana_bonuses: Array[Dictionary] = []
+var match_stats: Dictionary = {1: {"damage_dealt": 0, "spells_cast": 0, "cards_drawn": 0}, 2: {"damage_dealt": 0, "spells_cast": 0, "cards_drawn": 0}, 3: {"damage_dealt": 0, "spells_cast": 0, "cards_drawn": 0}, 4: {"damage_dealt": 0, "spells_cast": 0, "cards_drawn": 0}}
+
+func record_match_stat(pid: int, key: String, delta: int = 1) -> void:
+	if not match_stats.has(pid):
+		match_stats[pid] = {"damage_dealt": 0, "spells_cast": 0, "cards_drawn": 0}
+	match_stats[pid][key] = int(match_stats[pid].get(key, 0)) + delta
 
 func _load_table_settings() -> void:
 	if FileAccess.file_exists(TABLE_SETTINGS_PATH):
@@ -961,80 +1075,209 @@ func apply_playmat_theme(theme_id: String, _unused: String = "") -> void:
 	var mat := StandardMaterial3D.new()
 	match current_playmat_theme:
 		"dark_slate":
-			var nt := NoiseTexture2D.new()
-			var fnl := FastNoiseLite.new(); fnl.frequency = 0.04
-			nt.noise = fnl; nt.width = 256; nt.height = 256
-			mat.albedo_texture = nt
-			mat.albedo_color = Color(0.18, 0.21, 0.27, 1.0)
-			mat.roughness = 0.82
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; fnl.frequency = 0.018; fnl.fractal_octaves = 5
+			var f2 := FastNoiseLite.new(); f2.seed = 91; f2.frequency = 0.09
+			for y in range(512):
+				for x in range(512):
+					var n := clampf((fnl.get_noise_2d(x * 0.8, y * 1.4) + 0.5) * 0.72 + (f2.get_noise_2d(x, y) + 0.5) * 0.28, 0.0, 1.0)
+					var cleft := smoothstep(0.47, 0.51, absf(fnl.get_noise_2d(x * 0.3 + 40, y * 0.6))) * 0.06
+					img.set_pixel(x, y, Color(lerpf(0.11, 0.22, n) - cleft, lerpf(0.13, 0.25, n) - cleft, lerpf(0.17, 0.30, n) - cleft))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.72
+			mat.uv1_scale = Vector3(3, 3, 1)
 		"wood":
 			var wimg := Image.create(512, 512, false, Image.FORMAT_RGB8)
-			var wnl := FastNoiseLite.new()
-			wnl.frequency = 0.012
-			wnl.fractal_octaves = 4
+			var wnl := FastNoiseLite.new(); wnl.frequency = 0.012; wnl.fractal_octaves = 4
 			for wy in range(512):
-				var plank_idx := wy / 128
+				var plank_idx := int(float(wy) / 128.0)
 				var seam := (wy % 128) < 2
 				var plank_shift := float((plank_idx * 73) % 100)
 				for wx in range(512):
 					if seam:
-						wimg.set_pixel(wx, wy, Color(0.11, 0.06, 0.03))
-						continue
+						wimg.set_pixel(wx, wy, Color(0.11, 0.06, 0.03)); continue
 					var n_val := wnl.get_noise_2d(float(wx) * 0.18 + plank_shift, float(wy) * 2.2)
 					var ring := sin((float(wy) * 0.22 + n_val * 14.0)) * 0.5 + 0.5
 					var grain := clampf(ring * 0.65 + (n_val + 0.5) * 0.35, 0.0, 1.0)
-					var r_col := lerpf(0.24, 0.48, grain)
-					var g_col := lerpf(0.13, 0.27, grain)
-					var b_col := lerpf(0.06, 0.13, grain)
-					wimg.set_pixel(wx, wy, Color(r_col, g_col, b_col))
+					wimg.set_pixel(wx, wy, Color(lerpf(0.24, 0.48, grain), lerpf(0.13, 0.27, grain), lerpf(0.06, 0.13, grain)))
 			mat.albedo_texture = ImageTexture.create_from_image(wimg)
 			mat.roughness = 0.46
 			mat.uv1_scale = Vector3(3, 3, 1)
 		"starfield":
-			var simg := Image.create(256, 256, false, Image.FORMAT_RGB8)
-			simg.fill(Color(0.05, 0.06, 0.14))
+			var simg := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var neb := FastNoiseLite.new(); neb.frequency = 0.008; neb.fractal_octaves = 4
+			for y in range(512):
+				for x in range(512):
+					var n1 := clampf(neb.get_noise_2d(x, y) + 0.4, 0.0, 1.0)
+					var n2 := clampf(neb.get_noise_2d(x + 210, y - 140) + 0.3, 0.0, 1.0)
+					simg.set_pixel(x, y, Color(0.03 + n2 * 0.10, 0.04 + n1 * 0.06, 0.10 + n1 * 0.16 + n2 * 0.08))
 			var rng := RandomNumberGenerator.new(); rng.seed = 42
-			for _s in range(180):
-				var sx := rng.randi_range(0, 255); var sy := rng.randi_range(0, 255)
-				var br := rng.randf_range(0.55, 1.0)
-				simg.set_pixel(sx, sy, Color(br * 0.85, br * 0.92, br))
+			for _s in range(420):
+				var sx := rng.randi_range(2, 509); var sy := rng.randi_range(2, 509)
+				var br := rng.randf_range(0.50, 1.0)
+				var star_col := Color(br * 0.88, br * 0.93, br)
+				simg.set_pixel(sx, sy, star_col)
+				if br > 0.86:
+					for ox in [-1, 1]:
+						simg.set_pixel(sx + ox, sy, star_col * 0.55)
+						simg.set_pixel(sx, sy + ox, star_col * 0.55)
 			mat.albedo_texture = ImageTexture.create_from_image(simg)
-			mat.roughness = 0.45
-			mat.uv1_scale = Vector3(4, 4, 1)
+			mat.roughness = 0.35
+			mat.uv1_scale = Vector3(3, 3, 1)
 		"crimson_velvet":
-			var vt := NoiseTexture2D.new()
-			var vnl := FastNoiseLite.new(); vnl.frequency = 0.08
-			vt.noise = vnl; vt.width = 256; vt.height = 256
-			mat.albedo_texture = vt
-			mat.albedo_color = Color(0.38, 0.09, 0.12, 1.0)
-			mat.roughness = 0.88
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.frequency = 0.015; fnl.fractal_octaves = 4
+			var weave := FastNoiseLite.new(); weave.seed = 17; weave.frequency = 0.35
+			for y in range(512):
+				for x in range(512):
+					var crush := clampf(fnl.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var nap := (weave.get_noise_2d(x, y) + 0.5) * 0.14
+					var v := clampf(crush * 0.82 + nap, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.18, 0.46, v), lerpf(0.03, 0.09, v), lerpf(0.05, 0.13, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.86
+			mat.uv1_scale = Vector3(4, 4, 1)
 		"emerald_marble":
-			var mt := NoiseTexture2D.new()
-			var mnl := FastNoiseLite.new(); mnl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; mnl.frequency = 0.025; mnl.fractal_type = FastNoiseLite.FRACTAL_RIDGED
-			mt.noise = mnl; mt.width = 256; mt.height = 256
-			mat.albedo_texture = mt
-			mat.albedo_color = Color(0.14, 0.34, 0.25, 1.0)
-			mat.roughness = 0.32
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; fnl.frequency = 0.014; fnl.fractal_octaves = 5
+			for y in range(512):
+				for x in range(512):
+					var base_n := clampf(fnl.get_noise_2d(x * 0.7, y * 0.7) + 0.5, 0.0, 1.0)
+					var turb := fnl.get_noise_2d(x * 1.3 + 120, y * 1.3 - 80) * 10.0
+					var vein := pow(clampf(1.0 - absf(sin((float(x) * 0.02 + float(y) * 0.015) + turb)), 0.0, 1.0), 10.0)
+					var col := Color(lerpf(0.04, 0.14, base_n), lerpf(0.18, 0.36, base_n), lerpf(0.12, 0.25, base_n))
+					col = col.lerp(Color(0.72, 0.88, 0.78), vein * 0.75)
+					img.set_pixel(x, y, col)
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.18
+			mat.clearcoat = 0.72
+			mat.uv1_scale = Vector3(3, 3, 1)
 		"obsidian_grid":
-			var gimg := Image.create(128, 128, false, Image.FORMAT_RGB8)
-			gimg.fill(Color(0.06, 0.07, 0.10))
-			for gx in range(128):
-				gimg.set_pixel(gx, 0, Color(0.16, 0.36, 0.45))
-				gimg.set_pixel(0, gx, Color(0.16, 0.36, 0.45))
+			var gimg := Image.create(256, 256, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.frequency = 0.03
+			for y in range(256):
+				for x in range(256):
+					var is_line := (x % 64) < 2 or (y % 64) < 2
+					if is_line:
+						gimg.set_pixel(x, y, Color(0.14, 0.38, 0.48))
+					else:
+						var v := clampf((fnl.get_noise_2d(x, y) + 0.5) * 0.05, 0.0, 0.06)
+						gimg.set_pixel(x, y, Color(0.03 + v, 0.04 + v, 0.07 + v))
 			mat.albedo_texture = ImageTexture.create_from_image(gimg)
-			mat.roughness = 0.40
-			mat.uv1_scale = Vector3(12, 12, 1)
+			mat.roughness = 0.16
+			mat.clearcoat = 0.75
+			mat.uv1_scale = Vector3(6, 6, 1)
 		"parchment":
-			var pt := NoiseTexture2D.new()
-			var pnl := FastNoiseLite.new(); pnl.frequency = 0.03; pnl.fractal_octaves = 3
-			pt.noise = pnl; pt.width = 256; pt.height = 256
-			mat.albedo_texture = pt
-			mat.albedo_color = Color(0.68, 0.58, 0.42, 1.0)
-			mat.roughness = 0.85
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.frequency = 0.02; fnl.fractal_octaves = 5
+			var fib := FastNoiseLite.new(); fib.seed = 33; fib.frequency = 0.22
+			for y in range(512):
+				for x in range(512):
+					var n := clampf(fnl.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var f := (fib.get_noise_2d(x * 1.8, y * 0.6) + 0.5) * 0.12
+					var v := clampf(n * 0.85 + f, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.62, 0.82, v), lerpf(0.50, 0.71, v), lerpf(0.33, 0.52, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.84
+			mat.uv1_scale = Vector3(3, 3, 1)
+		"marble":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; fnl.frequency = 0.012; fnl.fractal_octaves = 5
+			for y in range(512):
+				for x in range(512):
+					var base_n := clampf(fnl.get_noise_2d(x * 0.5, y * 0.5) + 0.5, 0.0, 1.0)
+					var turb := fnl.get_noise_2d(x * 1.4, y * 1.4) * 11.0
+					var vein := pow(clampf(1.0 - absf(sin((float(x) * 0.018 + float(y) * 0.022) + turb)), 0.0, 1.0), 12.0)
+					var col := Color(lerpf(0.82, 0.94, base_n), lerpf(0.82, 0.94, base_n), lerpf(0.84, 0.96, base_n))
+					col = col.lerp(Color(0.32, 0.34, 0.38), vein * 0.82)
+					img.set_pixel(x, y, col)
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.14
+			mat.clearcoat = 0.80
+			mat.uv1_scale = Vector3(3, 3, 1)
+		"frosted_glass":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var fnl := FastNoiseLite.new(); fnl.frequency = 0.012; fnl.fractal_octaves = 3
+			var frost := FastNoiseLite.new(); frost.seed = 77; frost.frequency = 0.45
+			for y in range(512):
+				for x in range(512):
+					var wave := clampf(fnl.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var grain := (frost.get_noise_2d(x, y) + 0.5) * 0.18
+					var v := clampf(wave * 0.72 + grain, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.66, 0.82, v), lerpf(0.78, 0.90, v), lerpf(0.86, 0.96, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.28
+			mat.clearcoat = 0.55
+			mat.uv1_scale = Vector3(3, 3, 1)
+		"grassy_field":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var patch := FastNoiseLite.new(); patch.frequency = 0.014; patch.fractal_octaves = 4
+			var blade := FastNoiseLite.new(); blade.seed = 55; blade.frequency = 0.35
+			for y in range(512):
+				for x in range(512):
+					var p := clampf(patch.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var b := clampf(blade.get_noise_2d(x * 2.2, y * 0.7) + 0.5, 0.0, 1.0)
+					var v := clampf(p * 0.45 + b * 0.55, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.11, 0.27, v), lerpf(0.24, 0.49, v), lerpf(0.07, 0.16, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.90
+			mat.uv1_scale = Vector3(4, 4, 1)
+		"sand":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var dune := FastNoiseLite.new(); dune.frequency = 0.015; dune.fractal_octaves = 3
+			var grit := FastNoiseLite.new(); grit.seed = 19; grit.frequency = 0.55
+			for y in range(512):
+				for x in range(512):
+					var rip := sin(float(y) * 0.12 + dune.get_noise_2d(x, y) * 6.0) * 0.5 + 0.5
+					var sp := (grit.get_noise_2d(x, y) + 0.5) * 0.22
+					var v := clampf(rip * 0.70 + sp, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.68, 0.87, v), lerpf(0.57, 0.76, v), lerpf(0.39, 0.55, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.88
+			mat.uv1_scale = Vector3(4, 4, 1)
+		"dirt":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var soil := FastNoiseLite.new(); soil.frequency = 0.025; soil.fractal_octaves = 5
+			var peb := FastNoiseLite.new(); peb.seed = 64; peb.frequency = 0.25
+			for y in range(512):
+				for x in range(512):
+					var s := clampf(soil.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var p := clampf(peb.get_noise_2d(x, y) + 0.5, 0.0, 1.0)
+					var v := clampf(s * 0.65 + p * 0.35, 0.0, 1.0)
+					img.set_pixel(x, y, Color(lerpf(0.20, 0.39, v), lerpf(0.14, 0.27, v), lerpf(0.09, 0.17, v)))
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.94
+			mat.uv1_scale = Vector3(4, 4, 1)
+		"ocean":
+			var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+			var wv := FastNoiseLite.new(); wv.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH; wv.frequency = 0.02; wv.fractal_octaves = 4
+			var caus := FastNoiseLite.new(); caus.seed = 88; caus.frequency = 0.045; caus.fractal_type = FastNoiseLite.FRACTAL_RIDGED
+			for y in range(512):
+				for x in range(512):
+					var swell := clampf(wv.get_noise_2d(x * 0.8, y * 1.4) + 0.5, 0.0, 1.0)
+					var crest := pow(clampf(1.0 - absf(caus.get_noise_2d(x, y)), 0.0, 1.0), 4.0)
+					var col := Color(lerpf(0.03, 0.08, swell), lerpf(0.18, 0.40, swell), lerpf(0.36, 0.62, swell))
+					col = col.lerp(Color(0.70, 0.90, 0.98), crest * 0.45)
+					img.set_pixel(x, y, col)
+			mat.albedo_texture = ImageTexture.create_from_image(img)
+			mat.roughness = 0.15
+			mat.clearcoat = 0.78
+			mat.uv1_scale = Vector3(4, 4, 1)
 		_:
 			mat.albedo_texture = load("res://tableSurface.jpg")
 			mat.roughness = 0.65
+	if mat.albedo_texture != null:
+		var base_img := mat.albedo_texture.get_image()
+		if base_img and not base_img.is_empty():
+			var n_img := base_img.duplicate()
+			if n_img.is_compressed(): n_img.decompress()
+			n_img.bump_map_to_normal_map(1.8)
+			mat.normal_enabled = true
+			mat.normal_texture = ImageTexture.create_from_image(n_img)
+			mat.normal_scale = 0.50 if current_playmat_theme in ["ocean", "sand", "dirt", "wood"] else 0.28
+	_active_table_mat = mat
 	table_mesh.set_surface_override_material(0, mat)
+	_ensure_table_edge_trim(table_mesh)
 
 func spawn_impact_vfx(world_pos: Vector3, col: Color, scale_mult: float = 1.0) -> void:
 	var ring := MeshInstance3D.new()
@@ -1336,7 +1579,7 @@ func run_state_based_actions() -> void:
 	var dead_creatures: Array[Node3D] = []
 	var unattached_auras: Array[Node3D] = []
 
-	for card in battlefield_non_lands:
+	for card in battlefield_non_lands + battlefield_lands:
 		if not is_instance_valid(card): continue
 		var type_line := MagicRules.get_card_type_line(card.card_data).to_lower()
 		if "aura" in type_line:
@@ -1348,16 +1591,37 @@ func run_state_based_actions() -> void:
 			elif not enchant_req.is_empty() and not MagicRules.is_legal_target(host, enchant_req, get_card_owner_id(card), card):
 				zone_manager.detach_card(card)
 				continue
-		if "creature" in type_line:
+		if "custom_counters" in card and card.custom_counters is Dictionary:
+			var p1_c: int = int(card.custom_counters.get("+1/+1", 0))
+			var m1_c: int = int(card.custom_counters.get("-1/-1", 0))
+			var ann_c: int = mini(p1_c, m1_c)
+			if ann_c > 0:
+				card.modify_named_counter("+1/+1", -ann_c)
+				card.modify_named_counter("-1/-1", -ann_c)
+		if MagicRules.is_creature(card.card_data, 0, card):
 			var tou: int = card.dynamic_toughness
 			var dmg: int = card.marked_damage
 			var is_indestructible: bool = card.has_method("has_keyword") and bool(card.has_keyword("indestructible"))
 			var lethal_damage: bool = (dmg >= tou and tou > 0) or bool(card.get("has_deathtouch_damage"))
+			if lethal_damage and not is_indestructible and card.has_method("get_named_counter") and card.get_named_counter("shield") > 0:
+				card.modify_named_counter("shield", -1)
+				card.marked_damage = 0
+				card.has_deathtouch_damage = false
+				lethal_damage = false
+				card.refresh_visual_status()
 			if tou <= 0 or (lethal_damage and not is_indestructible):
 				dead_creatures.append(card)
+		if not MagicRules.is_creature(card.card_data, 0, card) and "attachments" in card and not card.attachments.is_empty():
+			for att_c in card.attachments.duplicate():
+				if is_instance_valid(att_c) and "equipment" in MagicRules.get_card_type_line(att_c.card_data).to_lower():
+					zone_manager.detach_card(att_c)
 		if "planeswalker" in type_line:
 			var loy: int = card.get_named_counter("loyalty") if card.has_method("get_named_counter") else 0
 			if loy <= 0:
+				dead_creatures.append(card)
+		if "battle" in type_line:
+			var def_c: int = card.get_named_counter("defense") if card.has_method("get_named_counter") else 0
+			if def_c <= 0:
 				dead_creatures.append(card)
 
 	for aura in unattached_auras:
@@ -1406,7 +1670,8 @@ func run_state_based_actions() -> void:
 				lost_by_cmd = true
 				break
 		var lost_by_poison: bool = int(player_counters.get(pid, {}).get("poison", 0)) >= 10
-		if player_life[pid] <= 0 or lost_by_cmd or lost_by_poison:
+		var lost_by_deck: bool = bool(drawn_from_empty_library.get(pid, false))
+		if player_life[pid] <= 0 or lost_by_cmd or lost_by_poison or lost_by_deck:
 			if hud_manager.life_labels.has(pid):
 				hud_manager.life_labels[pid].text = "DEAD"
 			if not is_player_eliminated(pid):
@@ -1461,7 +1726,10 @@ func advance_sagas_for_player(pid: int) -> void:
 		if max_ch > 0 and cur_lore >= max_ch:
 			zone_manager.move_to_graveyard(perm)
 
-func check_and_queue_triggers(event_name: String, source_card: Node3D = null) -> void:
+func check_and_queue_triggers(event_name: String, source_card: Node3D = null, event_player_id: int = -1) -> void:
+	if turn_manager and turn_manager.turn_number != _trigger_last_turn:
+		_trigger_last_turn = turn_manager.turn_number
+		_trigger_fire_counts_this_turn.clear()
 	var all_permanents := battlefield_lands + battlefield_non_lands
 	var src_valid := source_card != null and is_instance_valid(source_card)
 	var src_type := MagicRules.get_card_type_line(source_card.card_data).to_lower() if src_valid else ""
@@ -1472,6 +1740,12 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 		if not is_instance_valid(perm) or not perm.has_method("get_triggered_abilities"): continue
 		var perm_name := str(perm.card_data.get("name", "")).to_lower()
 		var perm_owner := get_card_owner_id(perm)
+		if event_name == "CAST" and src_valid and src_owner == perm_owner and not ("creature" in src_type):
+			var p_ol_pw := str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "")).to_lower()
+			if (perm.has_method("has_keyword") and bool(perm.has_keyword("prowess"))) or ("prowess" in p_ol_pw):
+				perm.temp_power_modifier += 1
+				perm.temp_toughness_modifier += 1
+				perm.refresh_visual_status()
 
 		for trig in perm.get_triggered_abilities():
 			var event_raw: String = str(trig.get("trigger_event_raw", "")).to_lower()
@@ -1517,6 +1791,12 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 			elif event_name == "END_STEP" and "beginning of" in event_raw and "end step" in event_raw:
 				if "your end step" in event_raw and perm_owner != turn_manager.active_player_id: continue
 				matched = true
+			elif event_name == "BECOMES_TAPPED" and src_valid and "becomes tapped" in event_raw:
+				var eq_match: bool = ("equipped creature" in event_raw or "enchanted creature" in event_raw) and ("attached_to" in perm and perm.attached_to == source_card)
+				var self_match: bool = ("this " in event_raw or "~" in event_raw) and perm == source_card
+				var ctrl_match: bool = ("creature you control" in event_raw and src_owner == perm_owner and "creature" in src_type)
+				if eq_match or self_match or ctrl_match:
+					matched = true
 			elif (event_name == "ATTACK" and src_valid and "attacks" in event_raw) or (event_name == "BLOCK" and src_valid and "blocks" in event_raw):
 				var is_ctrl_trigger: bool = ("creature you control" in event_raw and src_owner == perm_owner)
 				if perm == source_card or is_ctrl_trigger:
@@ -1526,11 +1806,34 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 			elif event_name == "COMBAT_DAMAGE_PLAYER" and src_valid and "combat damage" in event_raw and "player" in event_raw:
 				if perm == source_card or ("creature you control deals combat damage" in event_raw and src_owner == perm_owner):
 					matched = true
-			elif event_name == "CAST" and src_valid and "you cast" in event_raw and src_owner == perm_owner:
-				if "instant or sorcery" in event_raw and not ("instant" in src_type or "sorcery" in src_type): continue
-				if "creature spell" in event_raw and not ("noncreature" in event_raw) and not ("creature" in src_type): continue
-				if "noncreature" in event_raw and ("creature" in src_type): continue
-				matched = true
+			elif event_name == "CAST" and src_valid:
+				var cast_subj_ok := false
+				if "you cast" in event_raw:
+					cast_subj_ok = (src_owner == perm_owner)
+				elif "an opponent casts" in event_raw or "opponent casts" in event_raw or "another player casts" in event_raw:
+					cast_subj_ok = (src_owner != perm_owner)
+				elif "a player casts" in event_raw:
+					cast_subj_ok = (src_owner > 0)
+				if cast_subj_ok:
+					if "instant or sorcery" in event_raw and not ("instant" in src_type or "sorcery" in src_type): continue
+					if "creature spell" in event_raw and not ("noncreature" in event_raw) and not ("creature" in src_type): continue
+					if "noncreature" in event_raw and ("creature" in src_type): continue
+					if "planeswalker spell" in event_raw and not ("planeswalker" in src_type): continue
+					if "artifact spell" in event_raw and not ("artifact" in src_type): continue
+					if "enchantment spell" in event_raw and not ("enchantment" in src_type): continue
+					if "instant spell" in event_raw and not ("instant" in src_type): continue
+					if "sorcery spell" in event_raw and not ("sorcery" in src_type): continue
+					if "historic" in event_raw and not ("legendary" in src_type or "artifact" in src_type or "saga" in src_type): continue
+					var eff_cast_l := str(trig.get("effect_raw", "")).to_lower()
+					if "that player" in eff_cast_l or "its controller" in eff_cast_l or "that spell" in eff_cast_l:
+						def_tgt = source_card
+					matched = true
+			elif event_name == "DRAW":
+				var draw_pid: int = event_player_id if event_player_id > 0 else turn_manager.active_player_id
+				if "draw a card" in event_raw or "draws a card" in event_raw:
+					if "you draw" in event_raw and draw_pid != perm_owner: continue
+					if "an opponent draws" in event_raw and draw_pid == perm_owner: continue
+					matched = true
 
 			if matched:
 				if event_name == "ETB" and src_valid and is_etb_trigger_suppressed(source_card, perm_owner):
@@ -1542,6 +1845,11 @@ func check_and_queue_triggers(event_name: String, source_card: Node3D = null) ->
 					mult = get_etb_trigger_multiplier(source_card, perm_owner)
 				elif event_name == "DIE" and src_valid:
 					mult = get_die_trigger_multiplier(source_card)
+				var t_key := "%d|%s" % [perm.get_instance_id(), event_name]
+				var t_cnt := int(_trigger_fire_counts_this_turn.get(t_key, 0))
+				if t_cnt >= 16:
+					continue
+				_trigger_fire_counts_this_turn[t_key] = t_cnt + 1
 				for _m_i in range(mult):
 					collected_by_pid[perm_owner].append({"perm": perm, "trig": trig, "def_tgt": def_tgt})
 
@@ -1609,6 +1917,7 @@ func _finalize_push_ability_to_stack(source_card: Node3D, ability_data: Dictiona
 	event_ledger.log_event(GameEventLedger.EventType.STACK_PUSHED, {"card_name": stack_obj.name})
 	zone_manager.update_zone_counters()
 	EventBus.notify_stack(active_stack.size())
+	sync_network_state()
 
 func resolve_top_stack_card() -> void:
 	if active_stack.is_empty(): return
@@ -1651,7 +1960,7 @@ func resolve_top_stack_card() -> void:
 				if not w_cost.is_empty() and get_card_owner_id(tgt_n) != caster_id and not card_node.has_meta("ward_paid"):
 					if caster_id == local_player_id:
 						hud_manager.open_choice_popup("WARD %s — PAY OR COUNTER" % w_cost, ["Pay Ward (%s)" % w_cost, "Decline (Counter Spell)"], func(w_idx: int):
-							if w_idx == 0 and can_pay_and_drain_cost(w_cost, caster_id):
+							if w_idx == 0 and _can_pay_ward_cost(w_cost, caster_id):
 								card_node.set_meta("ward_paid", true)
 								active_stack.append(card_node)
 								resolve_top_stack_card()
@@ -1661,7 +1970,7 @@ func resolve_top_stack_card() -> void:
 								event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": card_node.card_data.get("name", "") + " (Countered by Ward)"})
 						)
 						return
-					elif not can_pay_and_drain_cost(w_cost, caster_id):
+					elif not _can_pay_ward_cost(w_cost, caster_id):
 						zone_manager.move_to_graveyard(card_node)
 						EventBus.play_sfx("fizzle")
 						event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": card_node.card_data.get("name", "") + " (Countered by Ward)"})
@@ -1840,7 +2149,7 @@ func is_activated_ability_suppressed(card_node: Node3D) -> bool:
 	if not is_instance_valid(card_node) or not card_node.is_on_battlefield: return false
 	var tl := MagicRules.get_card_type_line(card_node.card_data).to_lower()
 	var is_art := "artifact" in tl
-	var is_creat := MagicRules.is_creature(card_node.card_data)
+	var is_creat := MagicRules.is_creature(card_node.card_data, 0, card_node)
 	for p in battlefield_lands + battlefield_non_lands:
 		if not is_instance_valid(p) or not p.is_on_battlefield: continue
 		var ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
@@ -2068,9 +2377,30 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 		hud_manager.select_target(card_node)
 		return
 
-	if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and touch_attack_mode and button_index == MOUSE_BUTTON_LEFT and turn_manager.is_local_player_turn():
-		if combat_manager.handle_declare_attacker_key(card_node, false):
-			return
+	if not card_node.is_on_battlefield:
+		if get_card_owner_id(card_node) == local_player_id:
+			hud_manager.open_activated_abilities_menu(card_node)
+		return
+
+	if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS and button_index == MOUSE_BUTTON_LEFT and turn_manager.is_local_player_turn():
+		if combat_manager.pending_attacker != null and card_node != combat_manager.pending_attacker and get_card_controller_id(card_node) != local_player_id:
+			var t_l := MagicRules.get_card_type_line(card_node.card_data).to_lower()
+			if MagicRules.is_planeswalker(card_node.card_data) or "battle" in t_l:
+				if combat_manager.assign_attacker_target(combat_manager.pending_attacker, card_node):
+					if hud_manager: hud_manager.show_toast("Attacking %s" % str(card_node.card_data.get("name", "Target")), Color(0.95, 0.78, 0.35, 1.0))
+					sync_network_state()
+				return
+		if get_card_owner_id(card_node) == local_player_id and MagicRules.is_creature(card_node.card_data, 0, card_node):
+			if combat_manager.handle_declare_attacker_key(card_node, false):
+				if bool(card_node.get("is_attacking")):
+					var living_opps := 0
+					for op in [1, 2, 3, 4]:
+						if op != local_player_id and not is_player_eliminated(op): living_opps += 1
+					if living_opps >= 2:
+						combat_manager.pending_attacker = card_node
+						if hud_manager: hud_manager.show_toast("Tap an opponent's Placard, Planeswalker, or Battle to aim attack", Color(1.0, 0.85, 0.4, 1.0))
+				sync_network_state()
+				return
 
 	if turn_manager.current_turn_phase == TurnManager.TurnPhase.COMBAT_DECLARE_BLOCKERS and button_index == MOUSE_BUTTON_LEFT:
 		if combat_manager.handle_declare_blocker_click(card_node):
@@ -2093,8 +2423,18 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 		return
 
 	var mana_abilities := OracleParser.parse_mana_abilities(card_node.card_data, card_node)
-	if not mana_abilities.is_empty():
-		if card_node.is_tapped: return
+	var has_extra_act := false
+	if card_node.has_method("get_activated_abilities"):
+		for act_ab in card_node.get_activated_abilities():
+			var act_eff := str(act_ab.get("effect_raw", "")).to_lower()
+			if not ("add " in act_eff and ("mana" in act_eff or "{" in act_eff)):
+				has_extra_act = true
+				break
+	if not has_extra_act and "parsed_abilities" in card_node and int(card_node.parsed_abilities.get("crew_cost", 0)) > 0:
+		has_extra_act = true
+	if not has_extra_act and MagicRules.is_planeswalker(card_node.card_data):
+		has_extra_act = true
+	if not mana_abilities.is_empty() and not card_node.is_tapped and not has_extra_act:
 		if mana_abilities.size() == 1:
 			var ab: Dictionary = mana_abilities[0]
 			var cols: Array = ab.get("colors", [])
@@ -2105,8 +2445,7 @@ func _on_card_clicked_on_battlefield(card_node: Node3D, button_index: int = MOUS
 				return
 		hud_manager.show_mana_ability_popup(card_node, mana_abilities)
 	else:
-		card_node.toggle_tap()
-		sync_network_state()
+		hud_manager.open_activated_abilities_menu(card_node)
 
 
 func start_mulligan_phase() -> void:
@@ -2137,15 +2476,54 @@ func confirm_keep_hand() -> void:
 		mulligan_bottom_remaining = to_bottom
 		hud_manager.update_mulligan_ui()
 
+var _net_mulligan_ready: Dictionary = {}
+
+func _check_all_mulligans_ready() -> void:
+	if not is_network_multiplayer() or not multiplayer.is_server(): return
+	for s_id in network_manager.seat_to_peer.keys():
+		if not bool(_net_mulligan_ready.get(int(s_id), false)):
+			return
+	network_manager.dispatch_game_action("ALL_MULLIGANS_DONE", {"starting_pid": starting_player_id})
+	_begin_turn_one_after_mulligans()
+
+func _begin_turn_one_after_mulligans() -> void:
+	mulligan_phase_active = false
+	mulligan_bottom_remaining = 0
+	_net_mulligan_ready.clear()
+	if hud_manager:
+		hud_manager.hide_mulligan_ui()
+		if hud_manager.has_method("hide_dice_roll_banner"):
+			hud_manager.hide_dice_roll_banner()
+		if hud_manager.has_method("set_game_setup_complete"):
+			hud_manager.set_game_setup_complete(true)
+	turn_manager.set_starting_player(starting_player_id)
+	turn_manager.advance_turn_phase(false)
+	if not is_network_multiplayer() or multiplayer.is_server():
+		sync_network_state()
+
 func finish_mulligan_phase() -> void:
 	mulligan_phase_active = false
 	mulligan_bottom_remaining = 0
 	hud_manager.hide_mulligan_ui()
-	if hud_manager and hud_manager.has_method("set_game_setup_complete"):
-		hud_manager.set_game_setup_complete(true)
-	turn_manager.set_starting_player(starting_player_id)
-	turn_manager.advance_turn_phase(false)
-	sync_network_state()
+	if is_network_multiplayer():
+		_net_mulligan_ready[local_player_id] = true
+		var h_names: Array[String] = []
+		for hc in hand_cards:
+			if is_instance_valid(hc): h_names.append(str(hc.card_data.get("name", "")))
+		network_manager.dispatch_game_action("MULLIGAN_READY", {"pid": local_player_id, "hand_names": h_names})
+		if multiplayer.is_server():
+			var waiting_others := false
+			for s_id in network_manager.seat_to_peer.keys():
+				if not bool(_net_mulligan_ready.get(int(s_id), false)):
+					waiting_others = true; break
+			if waiting_others and hud_manager and hud_manager.has_method("show_dice_roll_banner"):
+				hud_manager.show_dice_roll_banner("Waiting for other players to finish mulligans...")
+			_check_all_mulligans_ready()
+		else:
+			if hud_manager and hud_manager.has_method("show_dice_roll_banner"):
+				hud_manager.show_dice_roll_banner("Waiting for host/players to finish mulligans...")
+		return
+	_begin_turn_one_after_mulligans()
 
 func _on_card_played(card_node: Node3D) -> void:
 	if not is_network_multiplayer() and not (card_node in active_stack): push_undo_snapshot()
@@ -2245,6 +2623,61 @@ func _does_mana_match_context(restriction: String, chosen_type: String, spell_co
 			return chosen_type.to_lower() in tl
 	return true
 
+func get_bonus_mana_for_tap(card_node: Node3D, base_cols: Array, tapper_id: int) -> Array[String]:
+	var extra: Array[String] = []
+	if not is_instance_valid(card_node) or base_cols.is_empty():
+		return extra
+	var tl := MagicRules.get_card_type_line(card_node.card_data).to_lower()
+	var is_land_card := MagicRules.is_land(card_node.card_data)
+	var base_c := str(base_cols[0])
+
+	for b in eot_mana_bonuses:
+		if not bool(b.get("all_players", true)) and int(b.get("owner_id", 0)) != tapper_id:
+			continue
+		var flt := str(b.get("filter", "land")).to_lower()
+		var flt_ok := (flt == "land" and is_land_card) or (flt in tl)
+		if flt_ok:
+			var ac := str(b.get("add_color", ""))
+			extra.append(base_c if ac.is_empty() else ac)
+
+	var mult := 1
+	var sym_rx := RegEx.new()
+	sym_rx.compile("adds?(?:\\s+an\\s+additional)?\\s+\\{([WUBRGC])\\}")
+	for perm in battlefield_lands + battlefield_non_lands:
+		if not is_instance_valid(perm) or not perm.is_on_battlefield: continue
+		var p_ctrl := get_card_controller_id(perm)
+		var ol := str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "")).to_lower()
+		if "tap a permanent for mana" in ol or "tap a land for mana" in ol:
+			if p_ctrl == tapper_id and ("permanent" in ol or is_land_card):
+				if "three times" in ol: mult *= 3
+				elif "twice as much" in ol: mult *= 2
+		for line in ol.split("\n"):
+			if not ("for mana" in line): continue
+			var is_all_p := ("whenever a player taps" in line) or ("whenever any player taps" in line)
+			var is_you := ("whenever you tap" in line) and (p_ctrl == tapper_id)
+			if not is_all_p and not is_you: continue
+			var type_ok := false
+			if "basic land" in line: type_ok = is_land_card and ("basic" in tl)
+			elif "nonbasic land" in line: type_ok = is_land_card and not ("basic" in tl)
+			elif "an island" in line or "a island" in line: type_ok = "island" in tl
+			elif "a swamp" in line: type_ok = "swamp" in tl
+			elif "a mountain" in line: type_ok = "mountain" in tl
+			elif "a forest" in line: type_ok = "forest" in tl
+			elif "a plains" in line: type_ok = "plains" in tl
+			elif "a land" in line: type_ok = is_land_card
+			elif "a creature" in line: type_ok = MagicRules.is_creature(card_node.card_data, 0, card_node)
+			if not type_ok: continue
+			var sm := sym_rx.search(line.to_upper())
+			if sm:
+				extra.append(sm.get_string(1).to_upper())
+			elif "any type" in line or "that much mana" in line or "chosen color" in line or "additional mana" in line:
+				extra.append(base_c)
+	if mult > 1:
+		for _mi in range(mult - 1):
+			for bc in base_cols:
+				extra.append(str(bc))
+	return extra
+
 func add_mana_from_ability(card_node: Node3D, ab: Dictionary, chosen_color: String = "") -> void:
 	if not is_instance_valid(card_node): return
 	var tap_cost: bool = bool(ab.get("tap_cost", true))
@@ -2289,6 +2722,13 @@ func add_mana_from_ability(card_node: Node3D, ab: Dictionary, chosen_color: Stri
 			spawned_cols.append(c_pick)
 
 	if not spawned_cols.is_empty():
+		var bonus_cols := get_bonus_mana_for_tap(card_node, spawned_cols, owner_id)
+		for bc in bonus_cols:
+			if restriction.is_empty():
+				mana_pool[bc] = int(mana_pool.get(bc, 0)) + 1
+			else:
+				restricted_mana.append({"color": bc, "restriction": restriction, "chosen_type": chosen_type})
+			spawned_cols.append(bc)
 		spawn_mana_produced_animation(card_node, spawned_cols)
 	if sac_cost and is_instance_valid(card_node):
 		zone_manager.move_to_graveyard(card_node)
@@ -2453,7 +2893,9 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 
 		var parsed_face: Dictionary = OracleParser.parse_oracle_text(str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", face_index)))
 		var face_name := str(MagicRules.get_card_attribute(card_node.card_data, "name", "SPELL", face_index))
-		var needs_cast_target := ("instant" in type_line or "sorcery" in type_line or "aura" in type_line)
+		var modal_info: Dictionary = parsed_face.get("modal", {})
+		var is_modal_spell: bool = int(modal_info.get("count", 0)) > 0 and not (modal_info.get("modes", []) as Array).is_empty()
+		var needs_cast_target := ("instant" in type_line or "sorcery" in type_line or "aura" in type_line) and not is_modal_spell
 		var req_cnt := OracleParser.count_required_targets(oracle_lower) if needs_cast_target else 0
 		if req_cnt > 0:
 			var req_str := OracleParser.extract_target_requirement(oracle_lower)
@@ -2463,7 +2905,6 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 					if hud_manager and hud_manager.has_method("show_toast"):
 						hud_manager.show_toast("Cannot cast %s — not enough legal targets (%d needed)" % [face_name, req_cnt])
 					return
-		var modal_info: Dictionary = parsed_face.get("modal", {})
 		var add_cost: Dictionary = parsed_face.get("additional_cost", {})
 
 		var step_pay_and_push = func(raw_mana_cost: String, sac_node: Node3D, add_discard_amt: int, add_life_amt: int):
@@ -2486,6 +2927,7 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 			zone_manager.move_to_stack(card_node)
 			if add_discard_amt > 0:
 				hud_manager.open_discard_choice(add_discard_amt)
+			sync_network_state()
 
 		var step_targeting = func(final_mana_cost: String, effect_scope_lower: String, sac_node: Node3D, add_discard_amt: int, add_life_amt: int):
 			var is_aura_spell := MagicRules.is_aura(card_node.card_data, face_index)
@@ -2493,6 +2935,13 @@ func _cast_card_face(card_node: Node3D, face_index: int, is_fuse: bool) -> void:
 			var needs_spell_target := is_aura_spell or (is_inst_or_sorc and ("target" in effect_scope_lower or (is_fuse and "target" in str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "", 1)).to_lower())))
 			if needs_spell_target:
 				var req: String = str(card_node.parsed_abilities.get("enchant_target", "creature")) if is_aura_spell else OracleParser.extract_target_requirement(effect_scope_lower)
+				var mode_req_cnt := OracleParser.count_required_targets(effect_scope_lower) if not is_aura_spell else 1
+				if mode_req_cnt > 0 and not req.is_empty():
+					var mode_avail := MagicRules.count_legal_targets(req, local_player_id, self, card_node)
+					if mode_avail < mode_req_cnt:
+						if hud_manager and hud_manager.has_method("show_toast"):
+							hud_manager.show_toast("Cannot cast %s — not enough legal targets (%d needed)" % [face_name, mode_req_cnt])
+						return
 				hud_manager.start_generic_targeting("SELECT TARGET (%s) FOR %s" % [req.to_upper() if not req.is_empty() else "ANY", face_name], func(chosen_target):
 					card_node.set_meta("chosen_target", chosen_target)
 					card_node.set_meta("target_requirement", req)
@@ -2570,7 +3019,7 @@ func get_max_available_x(mana_cost_str: String, payer_id: int = local_player_id)
 		var o_up := str(MagicRules.get_card_attribute(card.card_data, "oracle_text", "")).to_upper()
 		if "land" in tl or "{T}: ADD" in o_up or "ADD ONE MANA" in o_up:
 			total_avail += 1
-	return maxi(0, (total_avail - non_x_cost) / x_count)
+	return maxi(0, int(float(total_avail - non_x_cost) / float(x_count)))
 
 func can_player_potentially_afford(mana_cost_str: String, pid: int = local_player_id, spell_context: Dictionary = {}) -> bool:
 	if mana_cost_str.is_empty() or mana_cost_str == "{}" or mana_cost_str == "0":
@@ -2630,6 +3079,13 @@ func can_player_potentially_afford(mana_cost_str: String, pid: int = local_playe
 
 func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_id, spell_context: Dictionary = {}) -> bool:
 	if mana_cost_str.is_empty() or mana_cost_str == "{}" or mana_cost_str == "0": return true
+	var e_need: int = mana_cost_str.to_upper().count("{E}")
+	if e_need > 0:
+		var cur_e: int = int(player_counters.get(payer_id, {}).get("energy", 0))
+		if cur_e < e_need: return false
+		mana_cost_str = mana_cost_str.replace("{E}", "").replace("{e}", "")
+		modify_player_counter(payer_id, "energy", -e_need)
+		if mana_cost_str.strip_edges().is_empty(): return true
 
 	var colored_required := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
 	var generic_required := 0
@@ -2707,7 +3163,7 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 	var tapped_card_colors := {}
 	var generated_mana_to_add := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
 	var tap_pool := {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0}
-	var total_life_cost := 0
+	var life_cost_state := {"total": 0}
 
 	if total_missing > 0:
 		var available_options := []
@@ -2745,8 +3201,8 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 						if c in ab_cols: chosen_color = c; break
 				if not chosen_color.is_empty():
 					var l_c: int = int(ab.get("life_cost", 0))
-					if total_life_cost + l_c >= cur_life: continue
-					total_life_cost += l_c
+					if int(life_cost_state["total"]) + l_c >= cur_life: continue
+					life_cost_state["total"] = int(life_cost_state["total"]) + l_c
 					cards_to_tap.append(src_card)
 					var combo: Array = ab.get("fixed_combo", [])
 					var amt: int = int(ab.get("amount", 1))
@@ -2759,6 +3215,11 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 						tapped_card_colors[src_card] = [chosen_color]
 						generated_mana_to_add[chosen_color] += amt
 						tap_pool[chosen_color] += amt
+					var bonus_tap := get_bonus_mana_for_tap(src_card, tapped_card_colors[src_card], payer_id)
+					for bc in bonus_tap:
+						tapped_card_colors[src_card].append(bc)
+						generated_mana_to_add[bc] = int(generated_mana_to_add.get(bc, 0)) + 1
+						tap_pool[bc] = int(tap_pool.get(bc, 0)) + 1
 					return true
 			return false
 
@@ -2803,8 +3264,8 @@ func can_pay_and_drain_cost(mana_cost_str: String, payer_id: int = local_player_
 	for card in cards_to_tap:
 		card.toggle_tap()
 		if tapped_card_colors.has(card): spawn_mana_produced_animation(card, tapped_card_colors[card])
-	if total_life_cost > 0:
-		modify_life(payer_id, -total_life_cost)
+	if int(life_cost_state["total"]) > 0:
+		modify_life(payer_id, -int(life_cost_state["total"]))
 	for color in generated_mana_to_add.keys(): active_pool[color] += generated_mana_to_add[color]
 	if not cards_to_tap.is_empty(): zone_manager.update_battlefield_positions(true)
 
@@ -2852,8 +3313,8 @@ func spawn_mana_produced_animation(card_node: Variant, colors: Array) -> void:
 		tween.tween_property(sprite, "modulate:a", 0.0, 1.2)
 		tween.chain().tween_callback(func(): sprite.queue_free())
 
-func _spawn_new_token(token_data: Dictionary, count: int = 1) -> void:
-	var owner_id: int = turn_manager.active_player_id
+func _spawn_new_token(token_data: Dictionary, count: int = 1, owner_id_override: int = -1) -> void:
+	var owner_id: int = owner_id_override if owner_id_override > 0 else turn_manager.active_player_id
 	var final_count: int = count
 	for p in battlefield_lands + battlefield_non_lands:
 		if not is_instance_valid(p) or get_card_owner_id(p) != owner_id: continue
@@ -2861,13 +3322,13 @@ func _spawn_new_token(token_data: Dictionary, count: int = 1) -> void:
 		if "would create one or more tokens" in pot and "twice that many" in pot:
 			final_count *= 2
 	for _t_i in range(final_count):
-		_spawn_single_token_instance(token_data)
+		_spawn_single_token_instance(token_data, owner_id)
 
-func _spawn_single_token_instance(token_data: Dictionary) -> void:
+func _spawn_single_token_instance(token_data: Dictionary, owner_id_override: int = -1) -> void:
 	EventBus.play_sfx("token")
 	var token: Node3D = _instantiate_card()
 	token.card_data = token_data.duplicate(true)
-	token.set_meta("owner_id", turn_manager.active_player_id)
+	token.set_meta("owner_id", owner_id_override if owner_id_override > 0 else turn_manager.active_player_id)
 	connect_card_signals(token)
 	add_child(token)
 
@@ -2912,6 +3373,9 @@ func _spawn_single_token_instance(token_data: Dictionary) -> void:
 	var type_line: String = String(token_data.get("type_line", "")).to_lower()
 	if "land" in type_line: battlefield_lands.append(token)
 	else: battlefield_non_lands.append(token)
+	var start_loy_tok: int = int(token_data.get("starting_loyalty_counters", 0))
+	if start_loy_tok > 0 and token.has_method("modify_named_counter"):
+		token.modify_named_counter("loyalty", start_loy_tok)
 	EventBus.notify_etb(token, "TokenSpawner")
 	check_and_queue_triggers("ETB", token)
 	zone_manager.update_battlefield_positions(true)
@@ -3404,6 +3868,44 @@ func _on_network_action_received(sender_seat: int, action_type: String, payload:
 			set_initiative(int(payload.get("pid", sender_seat)), true)
 		"SET_DAY_NIGHT":
 			set_day_night(str(payload.get("state", "")), true)
+		"SET_FIRST_PLAYER":
+			if hud_manager and hud_manager.has_method("hide_dice_roll_banner"):
+				hud_manager.hide_dice_roll_banner()
+			var chosen_pid: int = int(payload.get("pid", 1))
+			starting_player_id = chosen_pid
+			if hud_manager:
+				hud_manager.show_toast("P%d (%s) goes first!" % [chosen_pid, get_player_display_name(chosen_pid)], Color(0.95, 0.78, 0.35, 1.0))
+			start_mulligan_phase()
+		"ROLL_FIRST_PLAYER_D20":
+			var rounds_arr: Array = payload.get("rounds", [])
+			var win_pid: int = int(payload.get("winner", 1))
+			_play_d20_roll_sequence(rounds_arr, win_pid)
+		"DICE_ADVANCE":
+			_dice_advance_signal.emit()
+		"REQUEST_RESYNC":
+			if multiplayer.is_server():
+				sync_network_state()
+		"MULLIGAN_READY":
+			var m_pid := int(payload.get("pid", sender_seat))
+			_net_mulligan_ready[m_pid] = true
+			if multiplayer.is_server() and payload.has("hand_names") and m_pid != local_player_id:
+				var wanted_hand: Array = payload["hand_names"]
+				var pool: Array = player_hands.get(m_pid, []) + player_libraries.get(m_pid, [])
+				var new_h: Array = []
+				for wn in wanted_hand:
+					for c_p in pool:
+						if is_instance_valid(c_p) and str(c_p.card_data.get("name", "")) == str(wn) and not (c_p in new_h):
+							new_h.append(c_p); break
+				var new_l: Array = []
+				for c_p in pool:
+					if is_instance_valid(c_p) and not (c_p in new_h): new_l.append(c_p)
+				player_hands[m_pid] = new_h
+				player_libraries[m_pid] = new_l
+				zone_manager.update_opponent_hand_positions(m_pid, false)
+			_check_all_mulligans_ready()
+		"ALL_MULLIGANS_DONE":
+			starting_player_id = int(payload.get("starting_pid", starting_player_id))
+			_begin_turn_one_after_mulligans()
 		"STATE_RESYNC":
 			GameSerializer.restore_state(self, payload)
 
@@ -3550,9 +4052,28 @@ func load_game_from_disk(path: String = SAVE_GAME_PATH) -> bool:
 	if not f: return false
 	var json := JSON.new()
 	if json.parse(f.get_as_text()) == OK and json.get_data() is Dictionary:
+		mulligan_phase_active = false
 		GameSerializer.restore_state(self, json.get_data())
-		if hud_manager and hud_manager.has_method("set_game_setup_complete"):
-			hud_manager.set_game_setup_complete(true)
+		if hud_manager:
+			if hud_manager.has_method("set_game_setup_complete"):
+				hud_manager.set_game_setup_complete(true)
+			if hud_manager.has_method("refresh_player_names"):
+				hud_manager.refresh_player_names()
+			if hud_manager.has_method("update_phase_ui"):
+				hud_manager.update_phase_ui()
+			if hud_manager.has_method("update_stack_ui"):
+				hud_manager.update_stack_ui()
+			if hud_manager.has_method("update_mana_ui"):
+				hud_manager.update_mana_ui()
+			if hud_manager.has_method("refresh_commander_damage_labels"):
+				hud_manager.refresh_commander_damage_labels()
+		refresh_command_info_stations()
+		if zone_manager:
+			zone_manager.update_zone_counters()
+		if turn_manager:
+			EventBus.notify_phase(turn_manager.current_turn_phase)
+			EventBus.notify_priority(turn_manager.priority_player_id, turn_manager.priority_passes_count)
+		EventBus.notify_stack(active_stack.size())
 		return true
 	return false
 
@@ -3594,8 +4115,9 @@ func _has_activatable_nonmana_ability(card_node: Node3D) -> bool:
 	if MagicRules.is_planeswalker(card_node.card_data) and is_sorc_ok and "loyalty_activated_this_turn" in card_node and not bool(card_node.loyalty_activated_this_turn):
 		var cur_loy: int = card_node.get_named_counter("loyalty") if card_node.has_method("get_named_counter") else 0
 		for lab in pa.get("loyalty_abilities", []):
-			var d_s := str(lab.get("delta_str", "0"))
+			var d_s := str(lab.get("delta_str", "0")).replace("−", "-")
 			var delta := 0 if "X" in d_s.to_upper() else d_s.to_int()
+			if "X" in d_s.to_upper() and cur_loy <= 0 and d_s.begins_with("-"): continue
 			if cur_loy + delta >= 0: return true
 	for ab in pa.get("activated_abilities", []):
 		var cost_raw := str(ab.get("cost_raw", ""))
@@ -3603,7 +4125,7 @@ func _has_activatable_nonmana_ability(card_node: Node3D) -> bool:
 		var eff_l := eff_raw.to_lower()
 		if "add " in eff_l: continue
 		if bool(ab.get("sorcery_speed", false)) and not is_sorc_ok: continue
-		if "{T}" in cost_raw.to_upper() and (card_node.is_tapped or (MagicRules.is_creature(card_node.card_data) and card_node.has_summoning_sickness)):
+		if "{T}" in cost_raw.to_upper() and (card_node.is_tapped or (MagicRules.is_creature(card_node.card_data, 0, card_node) and card_node.has_summoning_sickness)):
 			continue
 		if "exiled with" in eff_l or "exiled with" in cost_raw.to_lower():
 			var linked: Array = card_node.get_meta("linked_exiled_cards") if card_node.has_meta("linked_exiled_cards") else []
@@ -3622,7 +4144,7 @@ func _has_activatable_nonmana_ability(card_node: Node3D) -> bool:
 	var eq_cost := parse_equip_cost(str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "")))
 	if not eq_cost.is_empty() and is_sorc_ok and can_player_potentially_afford(eq_cost, local_player_id, {"is_activated": true}):
 		for cr in battlefield_non_lands:
-			if is_instance_valid(cr) and cr != card_node and get_card_controller_id(cr) == local_player_id and MagicRules.is_creature(cr.card_data):
+			if is_instance_valid(cr) and cr != card_node and get_card_controller_id(cr) == local_player_id and MagicRules.is_creature(cr.card_data, 0, cr):
 				return true
 	return false
 
@@ -3655,7 +4177,7 @@ func has_any_playable_card() -> bool:
 			if not ft_c.is_empty() and can_player_potentially_afford(ft_c, local_player_id): return true
 		elif c.has_meta("plotted_turn") and int(c.get_meta("plotted_turn")) < turn_manager.turn_number and turn_manager.can_act_sorcery_speed(local_player_id):
 			return true
-		elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok:
+		elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok and (not c.has_meta("playable_by_pid") or int(c.get_meta("playable_by_pid")) == local_player_id):
 			if can_player_potentially_afford(str(c.card_data.get("mana_cost", "")), local_player_id): return true
 	return false
 
@@ -3702,7 +4224,7 @@ func _do_refresh_playable_card_glows() -> void:
 				if not ft_c.is_empty() and can_player_potentially_afford(ft_c, local_player_id): ex_ok = true
 			elif c.has_meta("plotted_turn") and int(c.get_meta("plotted_turn")) < turn_manager.turn_number and turn_manager.can_act_sorcery_speed(local_player_id):
 				ex_ok = true
-			elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok:
+			elif c.has_meta("playable_from_exile") and bool(c.get_meta("playable_from_exile")) and timing_ok and (not c.has_meta("playable_by_pid") or int(c.get_meta("playable_by_pid")) == local_player_id):
 				var ex_c := str(c.card_data.get("mana_cost", ""))
 				if can_player_potentially_afford(ex_c, local_player_id): ex_ok = true
 		c.set_playable_glow(ex_ok)
@@ -3734,7 +4256,7 @@ func is_decision_popup_open() -> bool:
 	if hud_manager:
 		if hud_manager.active_target_callback.is_valid(): return true
 		if hud_manager.search_canvas and is_instance_valid(hud_manager.search_canvas): return true
-	for n_name in ["GenericChoiceUI", "LookAndPickUI", "ScrySurveilUI", "ModalChoiceUI", "FaceChoiceUI", "XStepperUI", "TriggerOrderUI", "DiscardHandSizeUI", "ActivatedAbilitiesUI", "ManaPopupUI"]:
+	for n_name in ["GenericChoiceUI", "LookAndPickUI", "ScrySurveilUI", "ModalChoiceUI", "FaceChoiceUI", "XStepperUI", "TriggerOrderUI", "ProliferateUI", "DiscardHandSizeUI", "ActivatedAbilitiesUI", "ManaPopupUI"]:
 		var n := get_node_or_null(n_name)
 		if n and is_instance_valid(n) and not n.is_queued_for_deletion():
 			return true
@@ -3746,6 +4268,617 @@ func resume_gameplay_after_decision() -> void:
 	var pid := turn_manager.priority_player_id
 	if ai_controller and ai_controller.should_ai_act_on_priority(pid):
 		ai_controller.schedule_ai_action(pid)
-	elif (pid == local_player_id and not turn_manager.has_local_player_interaction()) or (turn_manager.auto_pass_opponents and not is_human_seat(pid)):
+	elif (pid == local_player_id and not turn_manager.has_local_player_interaction()) or not is_human_seat(pid):
 		turn_manager._schedule_paced_auto_pass()
 	refresh_playable_card_glows()
+
+
+func start_first_player_decision() -> void:
+	var active_pids: Array[int] = []
+	for pid in [1, 2, 3, 4]:
+		if not is_player_eliminated(pid):
+			active_pids.append(pid)
+	if active_pids.size() <= 1:
+		starting_player_id = active_pids[0] if not active_pids.is_empty() else 1
+		start_mulligan_phase()
+		return
+	if is_network_multiplayer() and not multiplayer.is_server():
+		if hud_manager and hud_manager.has_method("show_dice_roll_banner"):
+			hud_manager.show_dice_roll_banner("Waiting for host to decide who goes first...")
+		return
+	if hud_manager and hud_manager.has_method("open_first_player_choice_popup"):
+		hud_manager.open_first_player_choice_popup(active_pids, _on_host_roll_first_player_d20, _on_host_select_first_player)
+	else:
+		start_mulligan_phase()
+
+func _on_host_select_first_player(pid: int) -> void:
+	starting_player_id = pid
+	if is_network_multiplayer():
+		network_manager.dispatch_game_action("SET_FIRST_PLAYER", {"pid": pid})
+	if hud_manager:
+		hud_manager.show_toast("P%d (%s) goes first!" % [pid, get_player_display_name(pid)], Color(0.95, 0.78, 0.35, 1.0))
+	start_mulligan_phase()
+
+func _on_host_roll_first_player_d20() -> void:
+	var contenders: Array[int] = []
+	for pid in [1, 2, 3, 4]:
+		if not is_player_eliminated(pid):
+			contenders.append(pid)
+	if contenders.is_empty():
+		start_mulligan_phase()
+		return
+	var rounds: Array = []
+	while contenders.size() > 1:
+		var r_dict: Dictionary = {}
+		var max_val: int = 0
+		for pid in contenders:
+			var roll_val: int = randi_range(1, 20)
+			r_dict[pid] = roll_val
+			if roll_val > max_val:
+				max_val = roll_val
+		rounds.append(r_dict)
+		var tied: Array[int] = []
+		for pid in contenders:
+			if int(r_dict[pid]) == max_val:
+				tied.append(pid)
+		contenders = tied
+	var winner_pid: int = contenders[0]
+	if is_network_multiplayer():
+		network_manager.dispatch_game_action("ROLL_FIRST_PLAYER_D20", {"rounds": rounds, "winner": winner_pid})
+	_play_d20_roll_sequence(rounds, winner_pid)
+
+signal _dice_advance_signal()
+
+func _create_d20_die_node() -> Dictionary:
+	var root := Node3D.new()
+	var spin_node := Node3D.new()
+	spin_node.name = "SpinPivot"
+	root.add_child(spin_node)
+	var align_node := Node3D.new()
+	align_node.name = "AlignPivot"
+	spin_node.add_child(align_node)
+
+	var phi: float = (1.0 + sqrt(5.0)) * 0.5
+	var radius: float = 0.24
+	var raw_verts: Array[Vector3] = [
+		Vector3(-1, phi, 0), Vector3(1, phi, 0), Vector3(-1, -phi, 0), Vector3(1, -phi, 0),
+		Vector3(0, -1, phi), Vector3(0, 1, phi), Vector3(0, -1, -phi), Vector3(0, 1, -phi),
+		Vector3(phi, 0, -1), Vector3(phi, 0, 1), Vector3(-phi, 0, -1), Vector3(-phi, 0, 1)
+	]
+	var verts: Array[Vector3] = []
+	for v in raw_verts:
+		verts.append(v.normalized() * radius)
+
+	var faces: Array = [
+		[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+		[1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+		[3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+		[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
+	]
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var face_normals: Dictionary = {}
+
+	for f_idx in range(faces.size()):
+		var f: Array = faces[f_idx]
+		var a: Vector3 = verts[int(f[0])]
+		var b: Vector3 = verts[int(f[1])]
+		var c: Vector3 = verts[int(f[2])]
+		var center: Vector3 = (a + b + c) / 3.0
+		var n: Vector3 = (b - a).cross(c - a).normalized()
+		if n.dot(center) < 0.0:
+			var tmp := b; b = c; c = tmp
+			n = -n
+		st.set_normal(n); st.add_vertex(a)
+		st.set_normal(n); st.add_vertex(b)
+		st.set_normal(n); st.add_vertex(c)
+
+		var face_num: int = f_idx + 1
+		face_normals[face_num] = n
+
+		var lbl := Label3D.new()
+		lbl.text = str(face_num)
+		lbl.modulate = Color(0.84, 0.72, 0.44, 0.92)
+		lbl.outline_modulate = Color(0.04, 0.07, 0.14, 0.80)
+		lbl.outline_size = 4
+		lbl.font_size = 24
+		lbl.pixel_size = 0.0044
+		lbl.double_sided = false
+		var up_tan: Vector3 = (a - center).normalized()
+		var right_tan: Vector3 = up_tan.cross(n).normalized()
+		up_tan = n.cross(right_tan).normalized()
+		lbl.basis = Basis(right_tan, up_tan, n)
+		lbl.position = center + n * 0.0035
+		align_node.add_child(lbl)
+
+	var body_mi := MeshInstance3D.new()
+	body_mi.mesh = st.commit()
+	var body_mat := StandardMaterial3D.new()
+	body_mat.albedo_color = Color(0.08, 0.14, 0.27, 1.0)
+	body_mat.metallic = 0.08
+	body_mat.roughness = 0.16
+	body_mat.clearcoat = 0.65
+	body_mat.clearcoat_roughness = 0.12
+	body_mi.set_surface_override_material(0, body_mat)
+	align_node.add_child(body_mi)
+
+	return {"node": root, "spin": spin_node, "align": align_node, "normals": face_normals}
+
+func _play_d20_roll_sequence(rounds: Array, winner_pid: int) -> void:
+	var is_host_or_solo: bool = (not is_network_multiplayer()) or multiplayer.is_server()
+	for r_idx in range(rounds.size()):
+		var r_dict: Dictionary = rounds[r_idx]
+		var msg := "Rolling 20-sided dice for First Player..." if r_idx == 0 else "Tie for highest! Re-rolling tied players..."
+		if hud_manager and hud_manager.has_method("show_dice_roll_banner"):
+			hud_manager.show_dice_roll_banner(msg)
+
+		var spawned_dice: Array[Node3D] = []
+		var roll_parts: Array[String] = []
+		var sorted_pids: Array[int] = []
+		for pid_k in r_dict.keys():
+			sorted_pids.append(int(pid_k))
+		sorted_pids.sort()
+
+		for pid in sorted_pids:
+			var roll_val: int = int(r_dict[pid]) if r_dict.has(pid) else int(r_dict[str(pid)])
+			roll_parts.append("P%d: %d" % [pid, roll_val])
+
+			var die_info := _create_d20_die_node()
+			var die_node: Node3D = die_info["node"]
+			var spin_node: Node3D = die_info["spin"]
+			var align_node: Node3D = die_info["align"]
+			var normals: Dictionary = die_info["normals"]
+			add_child(die_node)
+			spawned_dice.append(die_node)
+
+			var land_pos := Vector3(0.0, 0.23, 0.0)
+			var seat_yaw: float = 0.0
+			if player_playmat_meshes.has(pid) and is_instance_valid(player_playmat_meshes[pid]):
+				var pm_node := player_playmat_meshes[pid] as Node3D
+				var pm_pos: Vector3 = pm_node.global_position
+				seat_yaw = pm_node.global_rotation.y
+				var inward := Vector3(-pm_pos.x, 0.0, -pm_pos.z)
+				if inward.length() > 0.01:
+					inward = inward.normalized() * 0.45
+				land_pos = Vector3(pm_pos.x + inward.x, 0.23, pm_pos.z + inward.z)
+
+			var n_face: Vector3 = normals.get(roll_val, Vector3.UP)
+			var q_align: Quaternion
+			if n_face.dot(Vector3.UP) < -0.999:
+				q_align = Quaternion(Vector3.RIGHT, PI)
+			else:
+				q_align = Quaternion(n_face, Vector3.UP)
+			align_node.quaternion = Quaternion(Vector3.UP, seat_yaw) * q_align
+
+			var start_pos := land_pos + Vector3(randf_range(-0.35, 0.35), 1.35, randf_range(-0.30, 0.30))
+			die_node.global_position = start_pos
+			spin_node.rotation = Vector3(TAU * 2.0 + randf_range(-0.4, 0.4), TAU * 1.5 + randf_range(-0.4, 0.4), TAU * 1.0 + randf_range(-0.4, 0.4))
+
+			var tw := create_tween()
+			var mid_pos := start_pos.lerp(land_pos, 0.65) + Vector3(0.0, 0.10, 0.0)
+			var bounce_pos := land_pos + Vector3(0.0, 0.13, 0.0)
+			tw.set_parallel(true)
+			tw.tween_property(spin_node, "rotation", Vector3.ZERO, 1.15).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+			tw.tween_property(die_node, "global_position", mid_pos, 0.48).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			tw.chain().tween_property(die_node, "global_position", land_pos, 0.24).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			tw.chain().tween_property(die_node, "global_position", bounce_pos, 0.18).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.chain().tween_property(die_node, "global_position", land_pos, 0.25).set_trans(Tween.TRANS_BOUNCE).set_ease(Tween.EASE_OUT)
+
+		EventBus.play_sfx("draw")
+		await get_tree().create_timer(1.25).timeout
+		EventBus.play_sfx("tap")
+
+		var is_final_round: bool = (r_idx == rounds.size() - 1)
+		var summary := "  |  ".join(roll_parts)
+		if is_final_round:
+			summary += "   —   P%d (%s) goes first!" % [winner_pid, get_player_display_name(winner_pid)]
+		else:
+			summary += "   —   Tie for highest!"
+
+		if hud_manager and hud_manager.has_method("show_dice_roll_banner"):
+			if is_host_or_solo:
+				var btn_lbl := "Continue to Game" if is_final_round else "Re-roll Tied Players"
+				hud_manager.show_dice_roll_banner(summary, btn_lbl, func():
+					if is_network_multiplayer():
+						network_manager.dispatch_game_action("DICE_ADVANCE", {})
+					_dice_advance_signal.emit()
+				)
+			else:
+				hud_manager.show_dice_roll_banner(summary)
+
+		await _dice_advance_signal
+		for d_node in spawned_dice:
+			if is_instance_valid(d_node):
+				d_node.queue_free()
+
+	if hud_manager and hud_manager.has_method("hide_dice_roll_banner"):
+		hud_manager.hide_dice_roll_banner()
+	starting_player_id = winner_pid
+	if hud_manager:
+		hud_manager.show_toast("P%d (%s) wins the roll and goes first!" % [winner_pid, get_player_display_name(winner_pid)], Color(0.86, 0.72, 0.36, 1.0))
+	start_mulligan_phase()
+
+
+func _can_pay_ward_cost(w_cost: String, payer_id: int) -> bool:
+	var wl := w_cost.to_lower().strip_edges()
+	if "pay " in wl and "life" in wl:
+		var l_amt := AbilityResolver._extract_number(wl, "pay ")
+		if int(player_life.get(payer_id, 0)) <= l_amt: return false
+		modify_life(payer_id, -l_amt)
+		return true
+	if "discard" in wl:
+		var h_arr: Array = hand_cards if payer_id == local_player_id else player_hands.get(payer_id, [])
+		if h_arr.is_empty(): return false
+		var dc: Node3D = h_arr.pop_back()
+		if payer_id == local_player_id: zone_manager.update_hand_positions(true)
+		else: zone_manager.update_opponent_hand_positions(payer_id, true)
+		_on_card_to_graveyard(dc)
+		return true
+	if "sacrifice" in wl:
+		for p in battlefield_non_lands + battlefield_lands:
+			if is_instance_valid(p) and get_card_owner_id(p) == payer_id:
+				if "creature" in wl and not MagicRules.is_creature(p.card_data, 0, p): continue
+				_on_card_to_graveyard(p)
+				return true
+		return false
+	return can_pay_and_drain_cost(w_cost, payer_id)
+
+
+func _ensure_table_edge_trim(table_mesh: MeshInstance3D) -> void:
+	if not is_instance_valid(table_mesh) or table_mesh.get_node_or_null("TableEdgeTrim") != null:
+		return
+	var trim_root := Node3D.new()
+	trim_root.name = "TableEdgeTrim"
+	table_mesh.add_child(trim_root)
+	var trim_mat := StandardMaterial3D.new()
+	trim_mat.albedo_color = Color(0.16, 0.10, 0.06, 1.0)
+	trim_mat.roughness = 0.38
+	trim_mat.metallic = 0.22
+	var aabb := table_mesh.get_aabb()
+	var w: float = maxf(8.0, aabb.size.x)
+	var d: float = maxf(8.0, aabb.size.z)
+	var thick: float = 0.14
+	var bars := [
+		[Vector3(w + thick * 2.0, 0.08, thick), Vector3(0, 0.01, -d * 0.5 - thick * 0.5)],
+		[Vector3(w + thick * 2.0, 0.08, thick), Vector3(0, 0.01, d * 0.5 + thick * 0.5)],
+		[Vector3(thick, 0.08, d), Vector3(-w * 0.5 - thick * 0.5, 0.01, 0)],
+		[Vector3(thick, 0.08, d), Vector3(w * 0.5 + thick * 0.5, 0.01, 0)]
+	]
+	for b in bars:
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = b[0]
+		mi.mesh = bm
+		mi.position = b[1]
+		mi.material_override = trim_mat
+		trim_root.add_child(mi)
+
+func roll_3d_die_for_player(pid: int, sides: int = 20, reason: String = "") -> int:
+	var roll_val: int = randi_range(1, maxi(2, sides))
+	EventBus.play_sfx("dice")
+	if event_ledger:
+		event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": "P%d rolled %d (d%d)%s" % [pid, roll_val, sides, (" — " + reason) if not reason.is_empty() else ""]})
+	if get_tree() != null and player_playmat_meshes.has(pid):
+		var die_info := _create_d20_die_node()
+		var die_node: Node3D = die_info["node"]
+		var spin_node: Node3D = die_info["spin"]
+		var align_node: Node3D = die_info["align"]
+		var normals: Dictionary = die_info["normals"]
+		add_child(die_node)
+		var land_pos := Vector3(0.0, 0.23, 0.0)
+		var seat_yaw: float = 0.0
+		if is_instance_valid(player_playmat_meshes[pid]):
+			var pm_node := player_playmat_meshes[pid] as Node3D
+			var pm_pos: Vector3 = pm_node.global_position
+			seat_yaw = pm_node.global_rotation.y
+			var inward := Vector3(-pm_pos.x, 0.0, -pm_pos.z)
+			if inward.length() > 0.01: inward = inward.normalized() * 0.45
+			land_pos = Vector3(pm_pos.x + inward.x, 0.23, pm_pos.z + inward.z)
+		var n_face: Vector3 = normals.get(clampi(roll_val, 1, 20), Vector3.UP)
+		var q_align := Quaternion(Vector3.RIGHT, PI) if n_face.dot(Vector3.UP) < -0.999 else Quaternion(n_face, Vector3.UP)
+		align_node.quaternion = Quaternion(Vector3.UP, seat_yaw) * q_align
+		die_node.global_position = land_pos + Vector3(randf_range(-0.25, 0.25), 1.25, randf_range(-0.20, 0.20))
+		spin_node.rotation = Vector3(TAU * 2.0, TAU * 1.5, TAU)
+		var tw := create_tween().set_parallel(true)
+		tw.tween_property(spin_node, "rotation", Vector3.ZERO, 1.0).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(die_node, "global_position", land_pos, 0.85).set_trans(Tween.TRANS_BOUNCE).set_ease(Tween.EASE_OUT)
+		get_tree().create_timer(2.6).timeout.connect(func():
+			if is_instance_valid(die_node): die_node.queue_free()
+		)
+	return roll_val
+
+func flip_3d_coin_for_player(pid: int, reason: String = "") -> bool:
+	var is_heads: bool = (randi() % 2 == 0)
+	EventBus.play_sfx("dice")
+	if event_ledger:
+		event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": "P%d flipped %s%s" % [pid, "HEADS" if is_heads else "TAILS", (" — " + reason) if not reason.is_empty() else ""]})
+	if get_tree() != null and player_playmat_meshes.has(pid):
+		var coin_root := Node3D.new()
+		var mi := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.18; cm.bottom_radius = 0.18; cm.height = 0.032
+		mi.mesh = cm
+		var c_mat := StandardMaterial3D.new()
+		c_mat.albedo_color = Color(0.95, 0.78, 0.24) if is_heads else Color(0.75, 0.78, 0.84)
+		c_mat.metallic = 0.85; c_mat.roughness = 0.22
+		mi.material_override = c_mat
+		coin_root.add_child(mi)
+		var lbl := Label3D.new()
+		lbl.text = "H" if is_heads else "T"
+		lbl.font_size = 56; lbl.outline_size = 14
+		lbl.position = Vector3(0, 0.022, 0)
+		lbl.rotation_degrees = Vector3(-90, 0, 0)
+		coin_root.add_child(lbl)
+		add_child(coin_root)
+		var land_pos := Vector3(0.0, 0.08, 0.0)
+		if is_instance_valid(player_playmat_meshes[pid]):
+			var pm_node := player_playmat_meshes[pid] as Node3D
+			var pm_pos := pm_node.global_position
+			var inward := Vector3(-pm_pos.x, 0.0, -pm_pos.z)
+			if inward.length() > 0.01: inward = inward.normalized() * 0.45
+			land_pos = Vector3(pm_pos.x + inward.x, 0.08, pm_pos.z + inward.z)
+		coin_root.global_position = land_pos + Vector3(0, 1.35, 0)
+		coin_root.rotation = Vector3(TAU * 3.0, 0, 0)
+		var tw := create_tween().set_parallel(true)
+		tw.tween_property(coin_root, "rotation", Vector3.ZERO, 0.95).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		tw.tween_property(coin_root, "global_position", land_pos, 0.95).set_trans(Tween.TRANS_BOUNCE).set_ease(Tween.EASE_OUT)
+		get_tree().create_timer(2.4).timeout.connect(func():
+			if is_instance_valid(coin_root): coin_root.queue_free()
+		)
+	return is_heads
+
+
+func _make_painting_texture(seed_idx: int) -> ImageTexture:
+	var img := Image.create(128, 96, false, Image.FORMAT_RGB8)
+	var palettes := [
+		[Color(0.85, 0.36, 0.22), Color(0.96, 0.72, 0.32), Color(0.22, 0.18, 0.34)], # Sunset peaks
+		[Color(0.12, 0.32, 0.62), Color(0.32, 0.76, 0.88), Color(0.94, 0.92, 0.80)], # Ocean horizon
+		[Color(0.14, 0.38, 0.20), Color(0.45, 0.68, 0.26), Color(0.88, 0.82, 0.56)], # Emerald glade
+		[Color(0.28, 0.16, 0.44), Color(0.76, 0.38, 0.72), Color(0.96, 0.84, 0.42)], # Arcane twilight
+		[Color(0.68, 0.48, 0.22), Color(0.92, 0.80, 0.48), Color(0.26, 0.42, 0.64)], # Golden plains
+		[Color(0.58, 0.16, 0.18), Color(0.88, 0.52, 0.22), Color(0.18, 0.20, 0.24)]  # Volcanic dusk
+	]
+	var pal: Array = palettes[seed_idx % palettes.size()]
+	var c_top: Color = pal[0]
+	var c_mid: Color = pal[1]
+	var c_bot: Color = pal[2]
+	for y in range(96):
+		var ty := float(y) / 95.0
+		var row_col := c_top.lerp(c_mid, ty * 2.0) if ty < 0.5 else c_mid.lerp(c_bot, (ty - 0.5) * 2.0)
+		for x in range(128):
+			var wave := sin(float(x) * 0.08 + float(seed_idx) * 1.7) * 0.12
+			var ridge := 0.58 + wave + cos(float(x) * 0.035 - float(seed_idx)) * 0.08
+			var px := row_col if ty < ridge else c_bot.darkened(0.22)
+			var sun_d := Vector2(float(x) - 90.0, float(y) - 28.0).length()
+			if sun_d < 13.0:
+				px = px.lerp(c_mid.lightened(0.45), 1.0 - sun_d / 13.0)
+			img.set_pixel(x, y, px)
+	return ImageTexture.create_from_image(img)
+
+func _make_shag_carpet_texture() -> Dictionary:
+	var img := Image.create(256, 256, false, Image.FORMAT_RGB8)
+	var fn := FastNoiseLite.new()
+	fn.noise_type = FastNoiseLite.TYPE_CELLULAR
+	fn.frequency = 0.22
+	fn.fractal_octaves = 3
+	var fn2 := FastNoiseLite.new()
+	fn2.seed = 47
+	fn2.frequency = 0.55
+	for y in range(256):
+		for x in range(256):
+			var v1: float = (fn.get_noise_2d(x, y) + 0.5) * 0.65
+			var v2: float = (fn2.get_noise_2d(x, y) + 0.5) * 0.35
+			var shade: float = clampf(0.56 + (v1 + v2 - 0.5) * 0.24, 0.44, 0.76)
+			img.set_pixel(x, y, Color(shade, shade * 0.99, shade * 0.97))
+	var n_img := img.duplicate()
+	n_img.bump_map_to_normal_map(2.4)
+	return {
+		"albedo": ImageTexture.create_from_image(img),
+		"normal": ImageTexture.create_from_image(n_img)
+	}
+
+func _make_rug_texture() -> ImageTexture:
+	var img := Image.create(512, 512, false, Image.FORMAT_RGB8)
+	var c_crimson := Color(0.44, 0.11, 0.13)
+	var c_crimson_dk := Color(0.32, 0.08, 0.10)
+	var c_indigo := Color(0.11, 0.15, 0.28)
+	var c_teal := Color(0.14, 0.30, 0.32)
+	var c_gold := Color(0.80, 0.62, 0.25)
+	var c_ivory := Color(0.88, 0.82, 0.70)
+	for y in range(512):
+		for x in range(512):
+			var edge := mini(mini(x, 511 - x), mini(y, 511 - y))
+			var col := c_crimson
+			if edge < 8:
+				col = c_ivory if (int(float(x + y) / 4.0)) % 2 == 0 else c_gold
+			elif edge < 16 or (edge >= 48 and edge < 54):
+				col = c_gold
+			elif edge < 48:
+				var motif := (int(float(x) / 12.0) + int(float(y) / 12.0)) % 2 == 0
+				var inner_d := (absi((x % 24) - 12) + absi((y % 24) - 12))
+				if inner_d < 6:
+					col = c_gold
+				elif inner_d < 9:
+					col = c_ivory
+				else:
+					col = c_indigo if motif else c_indigo.lightened(0.06)
+			elif edge < 64:
+				col = c_ivory if (int(float(x) / 8.0) + int(float(y) / 8.0)) % 2 == 0 else c_teal
+			else:
+				var dx := float(x) - 255.5
+				var dy := float(y) - 255.5
+				var dist := sqrt(dx * dx + dy * dy)
+				var ang := atan2(dy, dx)
+				var star_r := 82.0 + 18.0 * cos(ang * 8.0)
+				if dist < 24.0:
+					col = c_gold
+				elif dist < 48.0:
+					col = c_ivory if int(ang * 8.0 / PI + 8.0) % 2 == 0 else c_teal
+				elif dist < star_r:
+					col = c_indigo if dist < star_r - 8.0 else c_gold
+				else:
+					var lat := absf(fmod(absf(dx) + absf(dy), 48.0) - 24.0)
+					if lat < 2.5:
+						col = c_gold.darkened(0.25)
+					elif (int(float(x) / 32.0) + int(float(y) / 32.0)) % 2 == 0:
+						col = c_crimson_dk
+			img.set_pixel(x, y, col)
+	return ImageTexture.create_from_image(img)
+
+func _setup_room_environment() -> void:
+	if get_node_or_null("GameRoomEnv") != null:
+		return
+	var room := Node3D.new()
+	room.name = "GameRoomEnv"
+	add_child(room)
+
+	# Light grey textured shag carpet floor
+	var shag := _make_shag_carpet_texture()
+	var floor_mat := StandardMaterial3D.new()
+	floor_mat.albedo_texture = shag["albedo"]
+	floor_mat.normal_enabled = true
+	floor_mat.normal_texture = shag["normal"]
+	floor_mat.normal_scale = 0.65
+	floor_mat.roughness = 0.96
+	floor_mat.uv1_scale = Vector3(14.0, 14.0, 1.0)
+	var floor_mi := MeshInstance3D.new()
+	var floor_bm := BoxMesh.new(); floor_bm.size = Vector3(40.0, 0.2, 40.0)
+	floor_mi.mesh = floor_bm; floor_mi.position = Vector3(0.0, -3.3, 0.0)
+	floor_mi.material_override = floor_mat
+	room.add_child(floor_mi)
+
+	# Woven Persian-style Area Rug under the table
+	var rug_mat := StandardMaterial3D.new()
+	rug_mat.albedo_texture = _make_rug_texture()
+	rug_mat.roughness = 0.92
+	var rug_mi := MeshInstance3D.new()
+	var rug_bm := BoxMesh.new(); rug_bm.size = Vector3(16.0, 0.04, 16.0)
+	rug_mi.mesh = rug_bm; rug_mi.position = Vector3(0.0, -3.18, 0.0)
+	rug_mi.material_override = rug_mat
+	room.add_child(rug_mi)
+
+	# Table apron & pedestal under tableSurface
+	var wood_mat := StandardMaterial3D.new()
+	wood_mat.albedo_color = Color(0.22, 0.13, 0.07, 1.0)
+	wood_mat.roughness = 0.48
+	var ped_mi := MeshInstance3D.new()
+	var ped_cm := CylinderMesh.new()
+	ped_cm.top_radius = 2.6; ped_cm.bottom_radius = 1.6; ped_cm.height = 3.2
+	ped_mi.mesh = ped_cm; ped_mi.position = Vector3(0.0, -1.65, 0.0)
+	ped_mi.material_override = wood_mat
+	room.add_child(ped_mi)
+
+	# Warm Plaster Walls, Wainscoting & Ceiling
+	var wall_mat := StandardMaterial3D.new()
+	wall_mat.albedo_color = Color(0.32, 0.30, 0.28, 1.0)
+	wall_mat.roughness = 0.88
+	var wainscot_mat := StandardMaterial3D.new()
+	wainscot_mat.albedo_color = Color(0.24, 0.15, 0.09, 1.0)
+	wainscot_mat.roughness = 0.58
+	var ceil_mat := StandardMaterial3D.new()
+	ceil_mat.albedo_color = Color(0.36, 0.34, 0.31, 1.0)
+	ceil_mat.roughness = 0.90
+
+	var ceil_mi := MeshInstance3D.new()
+	var ceil_bm := BoxMesh.new(); ceil_bm.size = Vector3(40.0, 0.2, 40.0)
+	ceil_mi.mesh = ceil_bm; ceil_mi.position = Vector3(0.0, 10.8, 0.0)
+	ceil_mi.material_override = ceil_mat
+	room.add_child(ceil_mi)
+
+	var wall_defs := [
+		[Vector3(40.0, 14.0, 0.4), Vector3(0.0, 3.7, -19.8), Vector3(40.0, 2.4, 0.48), Vector3(0.0, -2.0, -19.72)],
+		[Vector3(40.0, 14.0, 0.4), Vector3(0.0, 3.7, 19.8), Vector3(40.0, 2.4, 0.48), Vector3(0.0, -2.0, 19.72)],
+		[Vector3(0.4, 14.0, 40.0), Vector3(-19.8, 3.7, 0.0), Vector3(0.48, 2.4, 40.0), Vector3(-19.72, -2.0, 0.0)],
+		[Vector3(0.4, 14.0, 40.0), Vector3(19.8, 3.7, 0.0), Vector3(0.48, 2.4, 40.0), Vector3(19.72, -2.0, 0.0)],
+	]
+	for wd in wall_defs:
+		var w_mi := MeshInstance3D.new()
+		var w_bm := BoxMesh.new(); w_bm.size = wd[0]
+		w_mi.mesh = w_bm; w_mi.position = wd[1]; w_mi.material_override = wall_mat
+		room.add_child(w_mi)
+		var ws_mi := MeshInstance3D.new()
+		var ws_bm := BoxMesh.new(); ws_bm.size = wd[2]
+		ws_mi.mesh = ws_bm; ws_mi.position = wd[3]; ws_mi.material_override = wainscot_mat
+		room.add_child(ws_mi)
+
+	# 4 Corner Bookshelves (scaled 2x) with colorful books
+	var book_colors := [Color(0.62, 0.16, 0.16), Color(0.16, 0.28, 0.56), Color(0.18, 0.44, 0.22), Color(0.72, 0.52, 0.18), Color(0.42, 0.22, 0.14)]
+	var shelf_positions := [
+		Vector3(-15.5, 2.4, -15.5), Vector3(15.5, 2.4, -15.5),
+		Vector3(-15.5, 2.4, 15.5), Vector3(15.5, 2.4, 15.5)
+	]
+	for sp in shelf_positions:
+		var sh_root := Node3D.new()
+		sh_root.position = sp
+		sh_root.look_at_from_position(sp, Vector3(0.0, sp.y, 0.0), Vector3.UP)
+		sh_root.scale = Vector3(2.0, 2.0, 2.0)
+		var sh_mi := MeshInstance3D.new()
+		var sh_bm := BoxMesh.new(); sh_bm.size = Vector3(3.0, 5.6, 0.9)
+		sh_mi.mesh = sh_bm; sh_mi.material_override = wood_mat
+		sh_root.add_child(sh_mi)
+		for row_i in range(4):
+			var row_y := -1.8 + float(row_i) * 1.15
+			for b_i in range(7):
+				var bk := MeshInstance3D.new()
+				var bk_bm := BoxMesh.new(); bk_bm.size = Vector3(0.32, 0.78, 0.24)
+				bk.mesh = bk_bm
+				bk.position = Vector3(-1.05 + float(b_i) * 0.35, row_y, -0.46)
+				var b_mat := StandardMaterial3D.new()
+				b_mat.albedo_color = book_colors[(row_i * 7 + b_i) % book_colors.size()]
+				b_mat.roughness = 0.65
+				bk.material_override = b_mat
+				sh_root.add_child(bk)
+		room.add_child(sh_root)
+
+	# Framed Paintings on all 4 walls
+	var frame_mat := StandardMaterial3D.new()
+	frame_mat.albedo_color = Color(0.74, 0.56, 0.24, 1.0)
+	frame_mat.metallic = 0.55; frame_mat.roughness = 0.32
+	var paintings := [
+		[Vector3(-6.0, 3.6, -19.48), 0.0, 0],
+		[Vector3(6.0, 3.6, -19.48), 0.0, 1],
+		[Vector3(-6.0, 3.6, 19.48), PI, 2],
+		[Vector3(6.0, 3.6, 19.48), PI, 3],
+		[Vector3(-19.48, 3.6, 0.0), PI / 2.0, 4],
+		[Vector3(19.48, 3.6, 0.0), -PI / 2.0, 5],
+	]
+	for pt in paintings:
+		var p_root := Node3D.new()
+		p_root.position = pt[0]; p_root.rotation.y = pt[1]
+		var fr_mi := MeshInstance3D.new()
+		var fr_bm := BoxMesh.new(); fr_bm.size = Vector3(4.2, 3.1, 0.14)
+		fr_mi.mesh = fr_bm; fr_mi.material_override = frame_mat
+		p_root.add_child(fr_mi)
+		var art_mi := MeshInstance3D.new()
+		var art_bm := BoxMesh.new(); art_bm.size = Vector3(3.7, 2.6, 0.18)
+		art_mi.mesh = art_bm
+		var art_mat := StandardMaterial3D.new()
+		art_mat.albedo_texture = _make_painting_texture(int(pt[2]))
+		art_mat.roughness = 0.55
+		art_mi.material_override = art_mat
+		p_root.add_child(art_mi)
+		room.add_child(p_root)
+
+	# Overhead Chandelier + Brighter Warm Wall Sconces
+	var chan_light := OmniLight3D.new()
+	chan_light.position = Vector3(0.0, 8.8, 0.0)
+	chan_light.light_color = Color(1.0, 0.92, 0.78, 1.0)
+	chan_light.light_energy = 3.4
+	chan_light.omni_range = 42.0
+	chan_light.shadow_enabled = false
+	room.add_child(chan_light)
+
+	if not (OS.get_name() in ["Android", "iOS"]):
+		var sconce_positions := [
+			Vector3(0.0, 4.8, -18.6), Vector3(0.0, 4.8, 18.6),
+			Vector3(-18.6, 4.8, 0.0), Vector3(18.6, 4.8, 0.0)
+		]
+		for lp in sconce_positions:
+			var ol := OmniLight3D.new()
+			ol.position = lp
+			ol.light_color = Color(1.0, 0.86, 0.62, 1.0)
+			ol.light_energy = 2.2
+			ol.omni_range = 32.0
+			ol.shadow_enabled = false
+			room.add_child(ol)

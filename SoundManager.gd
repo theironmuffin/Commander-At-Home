@@ -43,6 +43,8 @@ func _ready() -> void:
 			eb.blocker_declared.connect(_on_blocker_declared)
 		if eb.has_signal("stack_changed") and not eb.stack_changed.is_connected(_on_stack_changed):
 			eb.stack_changed.connect(_on_stack_changed)
+		if eb.has_signal("phase_changed") and not eb.phase_changed.is_connected(_on_phase_changed):
+			eb.phase_changed.connect(_on_phase_changed)
 
 func _on_damage_dealt(_source: Node3D, target: Variant, amount: int) -> void:
 	if amount <= 0: return
@@ -52,8 +54,16 @@ func _on_damage_dealt(_source: Node3D, target: Variant, amount: int) -> void:
 
 func _on_etb(card: Node3D, _zone_from: String) -> void:
 	if card and is_instance_valid(card) and "card_data" in card:
-		if MagicRules.is_land(card.card_data):
+		if card.has_meta("is_commander") and bool(card.get_meta("is_commander")):
+			play_sfx("commander_etb")
+		elif MagicRules.is_land(card.card_data):
 			play_sfx("land")
+
+func _on_phase_changed(new_phase: int) -> void:
+	if new_phase == 4: # COMBAT_DECLARE_ATTACKERS
+		play_sfx("declare_attackers")
+	else:
+		play_sfx("phase_tick")
 
 func _on_card_died(_card: Node3D) -> void:
 	play_sfx("die")
@@ -237,6 +247,37 @@ func _bake_all_streams() -> void:
 	_streams["turn"] = _make_wav(0.28, func(t: float, _dur: float) -> float:
 		var env := exp(-t * 9.0) * minf(1.0, t / 0.015)
 		return (sin(TAU * 392.0 * t) * 0.55 + sin(TAU * 587.33 * t) * 0.35) * env * 0.42
+	)
+
+	_streams["declare_attackers"] = _make_wav(0.16, func(t: float, dur: float) -> float:
+		var env := exp(-t * 14.0) * minf(1.0, t / 0.008)
+		var f := lerpf(330.0, 495.0, t / dur)
+		return (sin(TAU * f * t) * 0.6 + sin(TAU * f * 1.5 * t) * 0.3) * env * 0.36
+	)
+
+	_streams["combat_damage"] = _make_wav(0.15, func(t: float, _dur: float) -> float:
+		var env := exp(-t * 20.0) * minf(1.0, t / 0.004)
+		return (sin(TAU * 92.0 * t) * 0.7 + randf_range(-0.25, 0.25)) * env * 0.45
+	)
+
+	_streams["loyalty"] = _make_wav(0.18, func(t: float, _dur: float) -> float:
+		var env := exp(-t * 14.0) * minf(1.0, t / 0.006)
+		return (sin(TAU * 783.99 * t) * 0.5 + sin(TAU * 1174.66 * t) * 0.35) * env * 0.32
+	)
+
+	_streams["commander_etb"] = _make_wav(0.28, func(t: float, _dur: float) -> float:
+		var env := exp(-t * 8.0) * minf(1.0, t / 0.012)
+		return (sin(TAU * 293.66 * t) * 0.45 + sin(TAU * 440.0 * t) * 0.35 + sin(TAU * 587.33 * t) * 0.28) * env * 0.42
+	)
+
+	_streams["phase_tick"] = _make_wav(0.04, func(t: float, _dur: float) -> float:
+		var env := exp(-t * 65.0) * minf(1.0, t / 0.002)
+		return sin(TAU * 680.0 * t) * env * 0.16
+	)
+
+	_streams["dice"] = _make_wav(0.12, func(t: float, _dur: float) -> float:
+		var env := exp(-t * 24.0) * minf(1.0, t / 0.003)
+		return (sin(TAU * 520.0 * t) * 0.4 + randf_range(-0.3, 0.3)) * env * 0.30
 	)
 
 func _make_wav(duration: float, sample_fn: Callable) -> AudioStreamWAV:

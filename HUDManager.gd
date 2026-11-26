@@ -24,7 +24,6 @@ var phase_ui_label: Label = null
 var priority_ui_label: Label = null
 var phase_step_buttons: Dictionary = {}
 var primary_action_btn: Button = null
-var hold_priority_btn: Button = null
 
 var card_preview_canvas: CanvasLayer = null
 var card_preview_texture_rect: TextureRect = null
@@ -79,14 +78,25 @@ func setup(main_engine: Node) -> void:
 	EventBus.damage_dealt.connect(func(_s, _t, _a): refresh_commander_damage_labels())
 
 func apply_custom_font(node: Node) -> void:
-	if node is Label or node is Button or node is OptionButton:
-		if engine.BELEREN_FONT: node.add_theme_font_override("font", engine.BELEREN_FONT)
+	var ui_font: Font = engine.get_active_ui_font() if engine and engine.has_method("get_active_ui_font") else (engine.BELEREN_FONT if engine else null)
+	if node is Label or node is Button or node is OptionButton or node is LineEdit or node is CheckBox:
+		if ui_font: node.add_theme_font_override("font", ui_font)
 	elif node is RichTextLabel:
-		if engine.BELEREN_FONT:
-			node.add_theme_font_override("normal_font", engine.BELEREN_FONT)
-			node.add_theme_font_override("bold_font", engine.BELEREN_FONT)
+		if ui_font:
+			node.add_theme_font_override("normal_font", ui_font)
+			node.add_theme_font_override("bold_font", ui_font)
 	elif node is Label3D:
-		if engine.BELEREN_FONT: node.font = engine.BELEREN_FONT
+		if engine and engine.BELEREN_FONT: node.font = engine.BELEREN_FONT
+
+	if node is Button or node is OptionButton:
+		if not node.has_theme_stylebox_override("focus"):
+			var bf := StyleBoxFlat.new()
+			bf.bg_color = Color(0.24, 0.28, 0.38, 0.96)
+			bf.border_color = Color(1.0, 0.85, 0.35, 1.0)
+			bf.set_border_width_all(2)
+			bf.corner_radius_top_left = 8; bf.corner_radius_top_right = 8
+			bf.corner_radius_bottom_left = 8; bf.corner_radius_bottom_right = 8
+			node.add_theme_stylebox_override("focus", bf)
 
 	if node is PanelContainer and not node.has_theme_stylebox_override("panel"):
 		var ps := StyleBoxFlat.new()
@@ -135,8 +145,10 @@ func refresh_player_names() -> void:
 		engine.refresh_command_info_stations()
 	update_phase_ui()
 
-func set_game_setup_complete(ready: bool) -> void:
-	game_setup_complete = ready
+func set_game_setup_complete(is_ready: bool) -> void:
+	game_setup_complete = is_ready
+	if is_ready:
+		setup_phase_hud()
 	setup_touch_action_bar()
 
 func setup_touch_action_bar() -> void:
@@ -165,25 +177,6 @@ func setup_touch_action_bar() -> void:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	margin.add_child(hbox)
-
-	touch_atk_btn = Button.new()
-	touch_atk_btn.text = "⚔ Attack Mode: OFF"
-	touch_atk_btn.custom_minimum_size = Vector2(145, 48)
-	touch_atk_btn.pressed.connect(func():
-		engine.touch_attack_mode = not engine.touch_attack_mode
-		touch_atk_btn.text = "⚔ Attack Mode: ON" if engine.touch_attack_mode else "⚔ Attack Mode: OFF"
-	)
-	hbox.add_child(touch_atk_btn)
-
-	var cyc_btn := Button.new()
-	cyc_btn.text = "🎯 Cycle Target"
-	cyc_btn.custom_minimum_size = Vector2(125, 48)
-	cyc_btn.pressed.connect(func():
-		for c in engine.battlefield_non_lands:
-			if is_instance_valid(c) and bool(c.get("is_attacking")) and engine.get_card_owner_id(c) == engine.local_player_id:
-				engine.combat_manager.handle_declare_attacker_key(c, true)
-	)
-	hbox.add_child(cyc_btn)
 
 	var gy_btn := Button.new()
 	gy_btn.text = "💀 GY"
@@ -458,12 +451,7 @@ func update_stack_ui() -> void:
 		sub_lbl.add_theme_color_override("font_color", Color(0.6, 0.8, 0.95, 1.0))
 		info_vbox.add_child(sub_lbl)
 
-		var counter_btn := Button.new()
-		counter_btn.text = "Counter"
-		counter_btn.add_theme_font_size_override("font_size", 10)
-		var stack_idx := i
-		counter_btn.pressed.connect(func(): engine.counter_stack_item(stack_idx))
-		row_hbox.add_child(counter_btn)
+
 
 		stack_list_vbox.add_child(row_panel)
 
@@ -545,28 +533,6 @@ func setup_phase_hud() -> void:
 	var action_vbox := VBoxContainer.new()
 	action_vbox.add_theme_constant_override("separation", 8)
 	action_margin.add_child(action_vbox)
-
-	hold_priority_btn = Button.new()
-	hold_priority_btn.text = "⚡ In Response: OFF"
-	hold_priority_btn.custom_minimum_size = Vector2(210, 34)
-	hold_priority_btn.add_theme_font_size_override("font_size", 12)
-	var hold_off_style := StyleBoxFlat.new()
-	hold_off_style.bg_color = Color(0.14, 0.16, 0.22, 0.92); hold_off_style.border_color = Color(0.35, 0.42, 0.55, 0.85); hold_off_style.set_border_width_all(1)
-	hold_off_style.corner_radius_top_left = 8; hold_off_style.corner_radius_top_right = 8; hold_off_style.corner_radius_bottom_left = 8; hold_off_style.corner_radius_bottom_right = 8
-	var hold_on_style := hold_off_style.duplicate()
-	hold_on_style.bg_color = Color(0.42, 0.28, 0.08, 0.96); hold_on_style.border_color = Color(1.0, 0.78, 0.22, 1.0); hold_on_style.set_border_width_all(2)
-	hold_priority_btn.add_theme_stylebox_override("normal", hold_off_style)
-	hold_priority_btn.add_theme_stylebox_override("hover", hold_off_style)
-	hold_priority_btn.pressed.connect(func():
-		var tm: TurnManager = engine.turn_manager
-		tm.hold_priority_in_response = not tm.hold_priority_in_response
-		hold_priority_btn.text = "⚡ In Response: ON" if tm.hold_priority_in_response else "⚡ In Response: OFF"
-		hold_priority_btn.add_theme_stylebox_override("normal", hold_on_style if tm.hold_priority_in_response else hold_off_style)
-		hold_priority_btn.add_theme_stylebox_override("hover", hold_on_style if tm.hold_priority_in_response else hold_off_style)
-		if not tm.hold_priority_in_response and tm.priority_player_id == engine.local_player_id and not tm.has_local_player_interaction():
-			tm._schedule_paced_auto_pass()
-	)
-	action_vbox.add_child(hold_priority_btn)
 
 	primary_action_btn = Button.new()
 	primary_action_btn.text = "Next [Space]"
@@ -1019,8 +985,13 @@ func cancel_attachment_targeting() -> void:
 		targeting_hud_canvas.queue_free()
 		targeting_hud_canvas = null
 
-func open_discard_choice(amount: int) -> void:
-	if amount <= 0 or engine.hand_cards.is_empty(): return
+var _discard_complete_cb: Callable = Callable()
+
+func open_discard_choice(amount: int, on_complete: Callable = Callable()) -> void:
+	if amount <= 0 or engine.hand_cards.is_empty():
+		if on_complete.is_valid(): on_complete.call(false)
+		return
+	_discard_complete_cb = on_complete
 	discard_remaining = mini(amount, engine.hand_cards.size())
 	if search_canvas and is_instance_valid(search_canvas):
 		search_canvas.queue_free(); search_canvas = null
@@ -1128,6 +1099,11 @@ func open_zone_viewer(zone_title: String, zone_cards: Array, zone_owner_id: int 
 				if discard_remaining <= 0 or engine.hand_cards.is_empty():
 					if search_canvas and is_instance_valid(search_canvas):
 						search_canvas.queue_free(); search_canvas = null
+					if _discard_complete_cb.is_valid():
+						var cb_ref := _discard_complete_cb
+						_discard_complete_cb = Callable()
+						cb_ref.call(true)
+					engine.sync_network_state()
 				else:
 					title_lbl.text = "CHOOSE %d MORE CARD(S) TO DISCARD" % discard_remaining
 			)
@@ -1183,15 +1159,19 @@ func open_zone_viewer(zone_title: String, zone_cards: Array, zone_owner_id: int 
 		grid.add_child(btn)
 		card_button_map[card_node] = btn
 
-		var tex: Texture2D = engine._get_card_texture(card_node)
+		var tex: Texture2D = null
+		if not bool(card_node.get("in_library")):
+			tex = engine._get_card_texture(card_node)
+		var front_url: String = str(card_node.card_data.get("image_url", ""))
+		if front_url.is_empty() and card_node.card_data.get("card_faces") is Array and not card_node.card_data["card_faces"].is_empty():
+			var face: Dictionary = card_node.card_data["card_faces"][0]
+			var uris: Dictionary = face.get("image_uris", {})
+			front_url = str(uris.get("normal", uris.get("small", "")))
+		if tex == null and not front_url.is_empty():
+			tex = CardManager.get_cached_image_texture(front_url)
 		if tex:
 			btn.texture_normal = tex
 		else:
-			var front_url: String = card_node.card_data.get("image_url", "")
-			if front_url.is_empty() and card_node.card_data.get("card_faces") is Array and not card_node.card_data["card_faces"].is_empty():
-				var face: Dictionary = card_node.card_data["card_faces"][0]
-				var uris: Dictionary = face.get("image_uris", {})
-				front_url = uris.get("normal", uris.get("small", ""))
 
 			if not front_url.is_empty():
 				var btn_id := btn.get_instance_id()
@@ -1309,7 +1289,18 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 	var existing_act := engine.get_node_or_null("ActivatedAbilitiesUI")
 	if existing_act: existing_act.queue_free()
 	var abilities: Array = card_node.get_activated_abilities()
-	var loy_abilities: Array = card_node.parsed_abilities.get("loyalty_abilities", [])
+	var loy_abilities: Array = []
+	if MagicRules.is_planeswalker(card_node.card_data):
+		loy_abilities = card_node.parsed_abilities.get("loyalty_abilities", []).duplicate()
+		for p_grant in engine.battlefield_non_lands + engine.battlefield_lands:
+			if not is_instance_valid(p_grant) or engine.get_card_owner_id(p_grant) != engine.local_player_id: continue
+			var g_ol := str(MagicRules.get_card_attribute(p_grant.card_data, "oracle_text", ""))
+			if "planeswalkers you control have" in g_ol.to_lower():
+				var g_pa: Dictionary = OracleParser.parse_oracle_text(g_ol)
+				var g_list: Array = g_pa.get("granted_loyalty_abilities", [])
+				if g_list.is_empty(): g_list = g_pa.get("loyalty_abilities", [])
+				for glab in g_list:
+					loy_abilities.append(glab)
 	var can_transform: bool = MagicRules.is_transform(card_node.card_data)
 	var is_room: bool = MagicRules.is_room(card_node.card_data)
 	var locked_doors: Array[int] = []
@@ -1320,13 +1311,14 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 
 	# Always allow opening menu on battlefield permanents so Counter Manager is accessible
 
-	var popup := Control.new()
+	var popup := CanvasLayer.new()
 	popup.name = "ActivatedAbilitiesUI"
-	popup.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.layer = 60
 	engine.add_child(popup)
 
 	var bg_overlay := ColorRect.new()
 	bg_overlay.color = Color(0, 0, 0, 0.65)
+	bg_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	bg_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	popup.add_child(bg_overlay)
 	bg_overlay.gui_input.connect(func(event):
@@ -1350,8 +1342,27 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(title)
 
+	if card_node.has_meta("is_manifested") and bool(card_node.get_meta("is_manifested")):
+		var real_d: Dictionary = card_node.get_meta("manifested_card_data") if card_node.has_meta("manifested_card_data") else {}
+		if not real_d.is_empty() and MagicRules.is_creature(real_d):
+			var flip_cost: String = str(real_d.get("mana_cost", ""))
+			var flip_btn := Button.new()
+			flip_btn.text = "Turn Face Up: %s (%s)" % [str(real_d.get("name", "Creature")), flip_cost if not flip_cost.is_empty() else "{0}"]
+			flip_btn.custom_minimum_size = Vector2(360, 40)
+			flip_btn.pressed.connect(func():
+				if flip_cost.is_empty() or engine.can_pay_and_drain_cost(flip_cost, engine.local_player_id, {}):
+					popup.queue_free()
+					card_node.remove_meta("is_manifested")
+					card_node.remove_meta("manifested_card_data")
+					card_node.card_data = real_d
+					if card_node.has_method("make_active"): card_node.make_active(real_d)
+					if card_node.has_method("refresh_visual_status"): card_node.refresh_visual_status()
+					engine.run_state_based_actions()
+			)
+			vbox.add_child(flip_btn)
+
 	for loy_ab in loy_abilities:
-		var d_str: String = str(loy_ab.get("delta_str", "0"))
+		var d_str: String = str(loy_ab.get("delta_str", "0")).replace("−", "-")
 		var eff_raw: String = str(loy_ab.get("effect_raw", ""))
 		var btn := Button.new()
 		btn.text = "[%s]: %s" % [d_str, eff_raw]
@@ -1360,7 +1371,8 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 		var cur_loy: int = card_node.get_named_counter("loyalty") if card_node.has_method("get_named_counter") else 0
 		var delta_val: int = 0 if "X" in d_str.to_upper() else d_str.to_int()
 		var already_used: bool = bool(card_node.get("loyalty_activated_this_turn"))
-		var can_act: bool = engine.turn_manager.can_act_sorcery_speed(engine.local_player_id) and not already_used and (delta_val >= 0 or cur_loy >= abs(delta_val))
+		var can_pay_x: bool = not ("X" in d_str.to_upper() and cur_loy <= 0 and d_str.begins_with("-"))
+		var can_act: bool = engine.turn_manager.can_act_sorcery_speed(engine.local_player_id) and not already_used and can_pay_x and (delta_val >= 0 or cur_loy >= abs(delta_val))
 		btn.disabled = not can_act
 		btn.pressed.connect(func():
 			popup.queue_free()
@@ -1368,6 +1380,7 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 				open_x_stepper_popup(str(card_node.card_data.get("name", "Planeswalker")), "[-X] Loyalty", cur_loy, func(x_val: int):
 					card_node.modify_named_counter("loyalty", -x_val)
 					card_node.loyalty_activated_this_turn = true
+					if engine.has_method("refresh_playable_card_glows"): engine.refresh_playable_card_glows()
 					var sub_ab: Dictionary = loy_ab.duplicate()
 					sub_ab["effect_raw"] = OracleParser.substitute_x_in_text(eff_raw, x_val)
 					engine._push_ability_to_stack(card_node, sub_ab, "Loyalty [-%d]" % x_val)
@@ -1375,6 +1388,7 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 			else:
 				card_node.modify_named_counter("loyalty", delta_val)
 				card_node.loyalty_activated_this_turn = true
+				if engine.has_method("refresh_playable_card_glows"): engine.refresh_playable_card_glows()
 				engine._push_ability_to_stack(card_node, loy_ab, "Loyalty [%s]" % d_str)
 		)
 		vbox.add_child(btn)
@@ -1389,6 +1403,22 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 		if sorcery_only and not engine.turn_manager.can_act_sorcery_speed(engine.local_player_id):
 			btn.disabled = true
 			btn.text += " [Sorcery Speed]"
+		var rem_c_rx := RegEx.new()
+		rem_c_rx.compile("remove\\s+(a|an|one|two|three|four|five|\\d+)\\s+([a-z0-9+/\\-]+)\\s+counter")
+		var rem_m := rem_c_rx.search(cost_raw.to_lower())
+		var rem_cnt: int = 0
+		var rem_type: String = ""
+		if rem_m:
+			var w_amt := rem_m.get_string(1)
+			rem_cnt = w_amt.to_int() if w_amt.is_valid_int() else ({"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}.get(w_amt, 1))
+			rem_type = rem_m.get_string(2).strip_edges().to_lower()
+			var has_c: int = 0
+			if rem_type == "+1/+1": has_c = maxi(0, int(card_node.counter_amount))
+			elif rem_type == "-1/-1": has_c = maxi(0, -int(card_node.counter_amount))
+			elif card_node.has_method("get_named_counter"): has_c = card_node.get_named_counter(rem_type)
+			if has_c < rem_cnt:
+				btn.disabled = true
+				btn.text += " [Need %d %s]" % [rem_cnt, rem_type]
 		btn.pressed.connect(func():
 			var needs_tap := "{T}" in cost_raw or "{t}" in cost_raw
 			if needs_tap and card_node.is_tapped:
@@ -1422,6 +1452,10 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 							show_mana_ability_popup(card_node, m_abs)
 						return
 				if not mana_cost.is_empty() and not engine.can_pay_and_drain_cost(mana_cost, engine.local_player_id, {"is_activated": true}): return
+				if rem_cnt > 0 and not rem_type.is_empty():
+					if rem_type == "+1/+1" and card_node.has_method("modify_counters"): card_node.modify_counters(-rem_cnt)
+					elif rem_type == "-1/-1" and card_node.has_method("modify_counters"): card_node.modify_counters(rem_cnt)
+					elif card_node.has_method("modify_named_counter"): card_node.modify_named_counter(rem_type, -rem_cnt)
 				if needs_tap: card_node.toggle_tap()
 				if sac_perm != null and is_instance_valid(sac_perm):
 					engine._on_card_to_graveyard(sac_perm)
@@ -1473,10 +1507,24 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 						finalize_with_sac.call(chosen_tgt, sac_cands[s_idx])
 				)
 
+			var run_with_x := func(chosen_tgt):
+				if "{X}" in cost_raw.to_upper():
+					var max_x: int = engine.get_max_available_x(cost_raw, engine.local_player_id)
+					open_x_stepper_popup(str(card_node.card_data.get("name", "Ability")), cost_raw, max_x, func(x_val: int):
+						var x_cost := cost_raw.replace("{X}", "{%d}" % x_val).replace("{x}", "{%d}" % x_val)
+						var x_eff := OracleParser.substitute_x_in_text(effect_raw, x_val)
+						if engine.can_pay_and_drain_cost(x_cost, engine.local_player_id, {"is_activated": true}):
+							if needs_tap: card_node.toggle_tap()
+							var x_ab: Dictionary = ab.duplicate(); x_ab["effect_raw"] = x_eff
+							engine._push_ability_to_stack(card_node, x_ab, "Activated (X=%d)" % x_val, chosen_tgt)
+					)
+				else:
+					execute_activation.call(chosen_tgt)
+
 			if not target_req.is_empty():
-				start_generic_targeting("SELECT %s" % target_req.to_upper(), func(tgt): execute_activation.call(tgt), target_req, card_node)
+				start_generic_targeting("SELECT %s" % target_req.to_upper(), func(tgt): run_with_x.call(tgt), target_req, card_node)
 			else:
-				execute_activation.call(null)
+				run_with_x.call(null)
 		)
 		vbox.add_child(btn)
 
@@ -1536,38 +1584,15 @@ func open_activated_abilities_menu(card_node: Node3D) -> void:
 		)
 		vbox.add_child(door_btn)
 
-	var cnt_btn := Button.new()
-	cnt_btn.text = "Manage Counters (Oil, Charge, Time, +1/+1...)"
-	cnt_btn.pressed.connect(func():
-		popup.queue_free()
-		open_counter_manager(card_node)
-	)
-	vbox.add_child(cnt_btn)
 
-	var st_lbl := Label.new()
-	st_lbl.text = "CREATURE STATUSES"
-	st_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	st_lbl.add_theme_font_size_override("font_size", 12)
-	st_lbl.add_theme_color_override("font_color", Color(0.65, 0.88, 1.0, 1.0))
-	vbox.add_child(st_lbl)
 
-	var st_row := HBoxContainer.new()
-	st_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	st_row.add_theme_constant_override("separation", 6)
-	vbox.add_child(st_row)
-	for s_name in ["Ring-bearer", "Renowned", "Monstrous", "Suspected", "Saddled"]:
-		var s_str: String = s_name
-		var sb := Button.new()
-		var active_s: bool = card_node.has_method("has_custom_status") and bool(card_node.has_custom_status(s_str))
-		sb.text = ("✓ " + s_str) if active_s else s_str
-		sb.add_theme_font_size_override("font_size", 11)
-		sb.pressed.connect(func():
-			if card_node.has_method("toggle_custom_status"):
-				card_node.toggle_custom_status(s_str)
-				var now_on := bool(card_node.has_custom_status(s_str))
-				sb.text = ("✓ " + s_str) if now_on else s_str
-		)
-		st_row.add_child(sb)
+
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.custom_minimum_size = Vector2(140, 38)
+	close_btn.pressed.connect(func(): popup.queue_free())
+	vbox.add_child(close_btn)
 
 	apply_custom_font(popup)
 
@@ -1717,7 +1742,7 @@ func open_choice_popup(title_text: String, choice_labels: Array, on_chosen: Call
 
 	apply_custom_font(popup)
 
-func open_face_choice_popup(card_node: Node3D, title_text: String, options: Array, on_selected: Callable) -> void:
+func open_face_choice_popup(_card_node: Node3D, title_text: String, options: Array, on_selected: Callable) -> void:
 	var existing := engine.get_node_or_null("FaceChoiceUI")
 	if existing: existing.queue_free()
 
@@ -1826,7 +1851,8 @@ func show_mana_choice_popup(card_node: Node3D, colors: Array) -> void:
 			engine.mana_pool[color] += 1
 			engine.event_ledger.log_event(GameEventLedger.EventType.MANA_ADDED, {"color": color, "amount": 1})
 			var c_ref := instance_from_id(card_id) as Node3D if card_id != 0 else null
-			engine.spawn_mana_produced_animation(c_ref if (c_ref and is_instance_valid(c_ref)) else spawn_pos, [color])
+			var anim_tgt: Variant = c_ref if (c_ref and is_instance_valid(c_ref)) else spawn_pos
+			engine.spawn_mana_produced_animation(anim_tgt, [color])
 			update_mana_ui()
 			popup.queue_free()
 		)
@@ -1839,6 +1865,16 @@ func show_mana_ability_popup(card_node: Node3D, abilities: Array[Dictionary]) ->
 	popup.layer = 100
 	popup.add_to_group("dismissible_popup")
 	engine.add_child(popup)
+
+	var bg_overlay := ColorRect.new()
+	bg_overlay.color = Color(0, 0, 0, 0.55)
+	bg_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	bg_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(bg_overlay)
+	bg_overlay.gui_input.connect(func(event):
+		if (event is InputEventMouseButton and event.pressed) or (event is InputEventScreenTouch and event.pressed):
+			popup.queue_free()
+	)
 
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1933,8 +1969,8 @@ func show_mana_ability_popup(card_node: Node3D, abilities: Array[Dictionary]) ->
 				row.add_child(btn)
 
 	var cancel_btn := Button.new()
-	cancel_btn.text = "Cancel"
-	cancel_btn.custom_minimum_size = Vector2(140, 34)
+	cancel_btn.text = "Close"
+	cancel_btn.custom_minimum_size = Vector2(140, 38)
 	cancel_btn.pressed.connect(func(): popup.queue_free())
 	vbox.add_child(cancel_btn)
 
@@ -2203,7 +2239,9 @@ func open_modal_choice_popup(card_name: String, choose_count: int, allow_repeat:
 	vbox.add_child(title)
 
 	var selected_modes: Array[String] = []
-	var confirm_btn: Button = Button.new() if choose_count > 1 else null
+	var confirm_btn: Button = null
+	if choose_count > 1:
+		confirm_btn = Button.new()
 	if confirm_btn:
 		confirm_btn.text = "Confirm (0/%d)" % choose_count
 		confirm_btn.disabled = true
@@ -2283,17 +2321,23 @@ func toggle_match_log() -> void:
 	match_log_canvas.layer = 115
 	engine.add_child(match_log_canvas)
 
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.58)
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.gui_input.connect(func(ev):
+		if (ev is InputEventMouseButton and ev.pressed) or (ev is InputEventScreenTouch and ev.pressed):
+			toggle_match_log()
+	)
+	match_log_canvas.add_child(bg)
+
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	match_log_canvas.add_child(center)
 
+	var vp_sz := engine.get_viewport().get_visible_rect().size
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(640, 480)
-	var style := StyleBoxFlat.new()
-	style.bg_color = engine.UI_BACKGROUND; style.border_color = engine.UI_BORDER; style.set_border_width_all(2)
-	style.corner_radius_top_left = 10; style.corner_radius_top_right = 10; style.corner_radius_bottom_left = 10; style.corner_radius_bottom_right = 10
-	style.content_margin_left = 20; style.content_margin_right = 20; style.content_margin_top = 16; style.content_margin_bottom = 16
-	panel.add_theme_stylebox_override("panel", style)
+	panel.custom_minimum_size = Vector2(minf(680.0, vp_sz.x - 28.0), minf(500.0, vp_sz.y - 36.0))
 	center.add_child(panel)
 
 	var vbox := VBoxContainer.new()
@@ -2301,31 +2345,138 @@ func toggle_match_log() -> void:
 	panel.add_child(vbox)
 
 	var hdr := HBoxContainer.new()
+	hdr.add_theme_constant_override("separation", 8)
 	vbox.add_child(hdr)
+
 	var title := Label.new()
 	title.text = "MATCH EVENT LOG"
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	title.add_theme_font_size_override("font_size", 16)
-	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(0.98, 0.86, 0.50, 1.0))
 	hdr.add_child(title)
+
 	var close_b := Button.new()
 	close_b.text = "Close"
+	close_b.custom_minimum_size = Vector2(90, 36)
 	close_b.pressed.connect(func(): toggle_match_log())
 	hdr.add_child(close_b)
 
+	var filter_row := HBoxContainer.new()
+	filter_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(filter_row)
+
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	vbox.add_child(scroll)
-	var log_lbl := Label.new()
-	log_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	log_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var lines: Array[String] = []
-	if engine.event_ledger and "event_history" in engine.event_ledger:
-		for ev in engine.event_ledger.event_history:
-			lines.append(str(ev))
-	log_lbl.text = "\n".join(lines) if not lines.is_empty() else "No events recorded yet."
-	scroll.add_child(log_lbl)
+
+	var log_rtl := RichTextLabel.new()
+	log_rtl.bbcode_enabled = true
+	log_rtl.fit_content = true
+	log_rtl.scroll_active = false
+	log_rtl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	log_rtl.add_theme_font_size_override("normal_font_size", 14)
+	log_rtl.add_theme_font_size_override("bold_font_size", 14)
+	scroll.add_child(log_rtl)
+
+	var phase_names := {
+		TurnManager.TurnPhase.UNTAP: "Untap",
+		TurnManager.TurnPhase.UPKEEP: "Upkeep",
+		TurnManager.TurnPhase.DRAW_STEP: "Draw",
+		TurnManager.TurnPhase.PRECOMBAT_MAIN: "Main 1",
+		TurnManager.TurnPhase.COMBAT_BEGIN: "Begin Combat",
+		TurnManager.TurnPhase.COMBAT_DECLARE_ATTACKERS: "Declare Attackers",
+		TurnManager.TurnPhase.COMBAT_DECLARE_BLOCKERS: "Declare Blockers",
+		TurnManager.TurnPhase.COMBAT_DAMAGE: "Combat Damage",
+		TurnManager.TurnPhase.COMBAT_END: "End Combat",
+		TurnManager.TurnPhase.POSTCOMBAT_MAIN: "Main 2",
+		TurnManager.TurnPhase.END: "End Step",
+		TurnManager.TurnPhase.CLEANUP: "Cleanup"
+	}
+
+	var _render_log := func(cat: String):
+		var lines: Array[String] = []
+		if engine.event_ledger and "event_history" in engine.event_ledger:
+			var hist: Array = engine.event_ledger.event_history
+			var last_header_idx := -1
+			for idx in range(hist.size() - 1, -1, -1):
+				var ev: Variant = hist[idx]
+				if not (ev is Dictionary):
+					lines.append(str(ev))
+					continue
+				var ev_type: int = int(ev.get("type", ev.get("event_type", -1)))
+				var d: Dictionary = {}
+				if ev.get("payload") is Dictionary: d = ev["payload"]
+				elif ev.get("details") is Dictionary: d = ev["details"]
+				elif ev.get("data") is Dictionary: d = ev["data"]
+				else: d = ev
+
+				match ev_type:
+					GameEventLedger.EventType.MANA_EMPTIED, GameEventLedger.EventType.PRIORITY_PASSED:
+						continue
+					GameEventLedger.EventType.PHASE_CHANGED:
+						var t_num := int(d.get("turn_number", d.get("turn", 1)))
+						var a_pid := int(d.get("active_player_id", d.get("active_player", 1)))
+						var ph_id := int(d.get("new_phase", d.get("phase", 0)))
+						var ph_str: String = str(phase_names.get(ph_id, "Phase %d" % ph_id))
+						var hdr_txt := "[color=#f5cf6e][b]── Turn %d · %s (P%d %s) ──[/b][/color]" % [t_num, ph_str, a_pid, engine.get_player_display_name(a_pid)]
+						if last_header_idx == lines.size() - 1 and last_header_idx >= 0:
+							lines[last_header_idx] = hdr_txt
+						else:
+							lines.append(hdr_txt)
+							last_header_idx = lines.size() - 1
+					GameEventLedger.EventType.STACK_PUSHED:
+						if cat in ["all", "spells"]:
+							lines.append("  [color=#66d4ff]▲ Cast / Trigger:[/color] %s" % str(d.get("card_name", "Ability")))
+					GameEventLedger.EventType.STACK_RESOLVED:
+						if cat in ["all", "spells"]:
+							lines.append("  [color=#7ae582]✓ Resolved:[/color] %s" % str(d.get("card_name", "Ability")))
+					GameEventLedger.EventType.LIFE_CHANGED:
+						if cat in ["all", "life"]:
+							var l_pid := int(d.get("player_id", 1))
+							var delta := int(d.get("delta", 0))
+							var new_l := int(d.get("new_life", 0))
+							if delta == 0: continue
+							var verb := "gained" if delta > 0 else "lost"
+							var col := "#6ee787" if delta > 0 else "#ff6b6b"
+							lines.append("  [color=%s]♥ P%d (%s) %s %d life → %d[/color]" % [col, l_pid, engine.get_player_display_name(l_pid), verb, absi(delta), new_l])
+					GameEventLedger.EventType.CARD_MOVED:
+						if cat in ["all", "moves"]:
+							var m_pid := int(d.get("player_id", 1))
+							var f_z := str(d.get("from_zone", ""))
+							var t_z := str(d.get("to_zone", ""))
+							var c_nm := str(d.get("card_name", "a card"))
+							if f_z == "Library" and t_z == "Hand":
+								if m_pid == engine.local_player_id:
+									lines.append("  [color=#c8d6e5]• You drew %s[/color]" % c_nm)
+								else:
+									lines.append("  [color=#9aa8b8]• P%d (%s) drew a card[/color]" % [m_pid, engine.get_player_display_name(m_pid)])
+							else:
+								lines.append("  [color=#b8c6d8]• P%d (%s): %s (%s → %s)[/color]" % [m_pid, engine.get_player_display_name(m_pid), c_nm, f_z, t_z])
+					GameEventLedger.EventType.CARD_TAPPED:
+						if cat in ["all", "moves"]:
+							lines.append("  [color=#a0aab8]↷ Tapped %s[/color]" % str(d.get("card_name", "Permanent")))
+					GameEventLedger.EventType.CARD_UNTAPPED:
+						if cat in ["all", "moves"] and d.has("target_player_id"):
+							var u_pid := int(d.get("target_player_id", 1))
+							lines.append("  [color=#a0aab8]↺ P%d (%s) untapped all permanents[/color]" % [u_pid, engine.get_player_display_name(u_pid)])
+					GameEventLedger.EventType.MANA_ADDED:
+						if cat in ["all", "spells"]:
+							lines.append("  [color=#ffd166]✦ Added {%s} mana[/color]" % str(d.get("color", "C")))
+		log_rtl.text = "
+".join(lines) if not lines.is_empty() else "[color=#9aa8b8]No matching events recorded yet.[/color]"
+
+	for f_cfg in [["All", "all"], ["Spells & Triggers", "spells"], ["Life", "life"], ["Draws & Moves", "moves"]]:
+		var fb := Button.new()
+		fb.text = f_cfg[0]
+		fb.custom_minimum_size = Vector2(0, 32)
+		var f_key: String = f_cfg[1]
+		fb.pressed.connect(func(): _render_log.call(f_key))
+		filter_row.add_child(fb)
+
+	_render_log.call("all")
 	apply_custom_font(match_log_canvas)
+	close_b.grab_focus()
 
 func open_scry_surveil_popup(is_surveil: bool, top_cards: Array) -> void:
 	if top_cards.is_empty(): return
@@ -2487,13 +2638,29 @@ func toggle_settings_menu() -> void:
 	surface_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	surface_btn.custom_minimum_size = Vector2(0, 38)
 	surface_btn.pressed.connect(func():
-		var themes := ["classic_felt", "dark_slate", "wood", "starfield", "crimson_velvet", "emerald_marble", "obsidian_grid", "parchment"]
+		var themes: Array = Array(engine.TABLE_SURFACES)
 		var cur_idx: int = themes.find(str(engine.current_playmat_theme))
 		var next_t: String = themes[(cur_idx + 1) % themes.size()]
 		engine.apply_playmat_theme(next_t)
 		surface_btn.text = _sf_label.call()
 	)
 	grid.add_child(surface_btn)
+
+	if engine.is_network_multiplayer():
+		var resync_btn := Button.new()
+		resync_btn.text = "Resync Board (MP)"
+		resync_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		resync_btn.custom_minimum_size = Vector2(0, 38)
+		resync_btn.pressed.connect(func():
+			toggle_settings_menu()
+			if engine.multiplayer.is_server():
+				engine.sync_network_state()
+			else:
+				engine.network_manager.dispatch_game_action("REQUEST_RESYNC", {})
+			show_toast("Board resync requested", Color(0.55, 0.85, 1.0, 1.0))
+		)
+		grid.add_child(resync_btn)
+
 
 	var my_slv_btn := Button.new()
 	my_slv_btn.text = "🃏 My Sleeves..."
@@ -2573,16 +2740,6 @@ func toggle_settings_menu() -> void:
 	)
 	sfx_vol_box.add_child(sfx_vol_slider)
 	grid.add_child(sfx_vol_box)
-
-	var auto_btn := Button.new()
-	auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
-	auto_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	auto_btn.custom_minimum_size = Vector2(0, 38)
-	auto_btn.pressed.connect(func():
-		engine.turn_manager.auto_pass_opponents = not engine.turn_manager.auto_pass_opponents
-		auto_btn.text = "Auto-Pass Opponents: ON" if engine.turn_manager.auto_pass_opponents else "Auto-Pass Opponents: OFF"
-	)
-	grid.add_child(auto_btn)
 
 	var diff_btn := Button.new()
 	var _diff_lbl := func() -> String:
@@ -2725,7 +2882,7 @@ func show_game_over_banner(winner_pid: int) -> void:
 	engine.add_child(canvas)
 
 	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.78)
+	bg.color = Color(0, 0, 0, 0.82)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	canvas.add_child(bg)
 
@@ -2734,36 +2891,97 @@ func show_game_over_banner(winner_pid: int) -> void:
 	canvas.add_child(center)
 
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(460, 0)
+	panel.custom_minimum_size = Vector2(560, 0)
 	center.add_child(panel)
 
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 24)
+	margin.add_theme_constant_override("margin_right", 24)
+	margin.add_theme_constant_override("margin_top", 20)
+	margin.add_theme_constant_override("margin_bottom", 20)
+	panel.add_child(margin)
+
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 14)
-	panel.add_child(vbox)
+	vbox.add_theme_constant_override("separation", 12)
+	margin.add_child(vbox)
 
 	var title := Label.new()
 	title.text = "MATCH COMPLETE"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_font_size_override("font_size", 24)
 	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4, 1.0))
 	vbox.add_child(title)
 
 	var sub := Label.new()
 	var w_name: String = str(engine.get_player_display_name(winner_pid)) if winner_pid > 0 else "Draw"
-	sub.text = "%s wins on Turn %d!" % [w_name, engine.turn_manager.turn_number] if winner_pid > 0 else "All players eliminated!"
+	var cmd_name: String = ""
+	if winner_pid > 0:
+		for c in engine.battlefield_non_lands + engine.command_zone_cards:
+			if is_instance_valid(c) and engine.get_card_owner_id(c) == winner_pid and c.has_meta("is_commander") and bool(c.get_meta("is_commander")):
+				cmd_name = str(c.card_data.get("name", ""))
+				break
+	sub.text = ("%s wins on Turn %d!" % [w_name, engine.turn_manager.turn_number]) if winner_pid > 0 else "All players eliminated!"
+	if not cmd_name.is_empty():
+		sub.text += "  •  Commander: %s" % cmd_name
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub.add_theme_font_size_override("font_size", 16)
+	sub.add_theme_font_size_override("font_size", 15)
 	vbox.add_child(sub)
 
+	var stats_box := VBoxContainer.new()
+	stats_box.add_theme_constant_override("separation", 4)
+	vbox.add_child(stats_box)
+	var m_stats: Dictionary = engine.get("match_stats") if "match_stats" in engine else {}
+	for pid in [1, 2, 3, 4]:
+		var st: Dictionary = m_stats.get(pid, {})
+		var row_lbl := Label.new()
+		var p_nm: String = str(engine.get_player_display_name(pid)) if engine.has_method("get_player_display_name") else ("P%d" % pid)
+		var life_v: int = int(engine.player_life.get(pid, 0))
+		row_lbl.text = "%s  |  Life: %d  |  Spells: %d  |  Dmg: %d  |  Draws: %d" % [
+			p_nm, life_v, int(st.get("spells_cast", 0)), int(st.get("damage_dealt", 0)), int(st.get("cards_drawn", 0))
+		]
+		row_lbl.add_theme_font_size_override("font_size", 13)
+		if pid == winner_pid:
+			row_lbl.add_theme_color_override("font_color", Color(0.55, 0.95, 0.55, 1.0))
+		stats_box.add_child(row_lbl)
+
 	var restart_btn := Button.new()
-	restart_btn.text = "New Game / Reselect Decks"
-	restart_btn.custom_minimum_size = Vector2(0, 42)
+	restart_btn.text = "Play Again / Reselect Decks"
+	restart_btn.custom_minimum_size = Vector2(0, 44)
 	restart_btn.pressed.connect(func():
 		canvas.queue_free()
 		engine.reset_game_and_reselect_decks()
 	)
 	vbox.add_child(restart_btn)
 	apply_custom_font(canvas)
+
+func update_prefetch_progress(done: int, total: int) -> void:
+	if not is_instance_valid(engine): return
+	var existing := engine.get_node_or_null("PrefetchProgressUI")
+	if total <= 0 or done >= total:
+		if existing: existing.queue_free()
+		return
+	var canvas: CanvasLayer = existing as CanvasLayer
+	if canvas == null:
+		canvas = CanvasLayer.new()
+		canvas.name = "PrefetchProgressUI"
+		canvas.layer = 95
+		engine.add_child(canvas)
+		var pill := PanelContainer.new()
+		pill.name = "Pill"
+		pill.anchor_left = 1.0; pill.anchor_right = 1.0
+		pill.anchor_top = 1.0; pill.anchor_bottom = 1.0
+		pill.offset_left = -250; pill.offset_right = -16
+		pill.offset_top = -54; pill.offset_bottom = -16
+		canvas.add_child(pill)
+		var lbl := Label.new()
+		lbl.name = "Lbl"
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl.add_theme_font_size_override("font_size", 13)
+		pill.add_child(lbl)
+	var lbl_node: Label = canvas.get_node_or_null("Pill/Lbl")
+	if lbl_node:
+		lbl_node.text = "Caching Deck Art: %d / %d" % [done, total]
 
 func open_damage_order_popup(attacker: Node3D, blockers: Array, on_confirmed: Callable) -> void:
 	var existing := engine.get_node_or_null("DamageOrderUI")
@@ -3224,6 +3442,7 @@ func open_multiplayer_lobby() -> void:
 
 func open_trigger_order_popup(trigs: Array, callback: Callable) -> void:
 	var popup := CanvasLayer.new()
+	popup.name = "TriggerOrderUI"
 	popup.layer = 110
 	engine.add_child(popup)
 
@@ -3384,10 +3603,8 @@ func open_look_and_pick_popup(top_cards: Array, pick_count: int = 1, dest_zone: 
 		tex_rect.custom_minimum_size = Vector2(165, 230)
 		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		var img_url: String = str(MagicRules.get_card_attribute(c_node.card_data, "image_url", ""))
-		if not img_url.is_empty():
-			var cached_t = CardManager.get_cached_texture(img_url)
-			if cached_t: tex_rect.texture = cached_t
+		var card_tex: Texture2D = c_node.get_active_texture() if c_node.has_method("get_active_texture") else null
+		if card_tex: tex_rect.texture = card_tex
 		c_vbox.add_child(tex_rect)
 
 		var pick_btn := Button.new()
@@ -3468,10 +3685,8 @@ func open_discard_to_hand_size_popup(discard_count: int, max_hand_size: int, on_
 		tex_rect.custom_minimum_size = Vector2(145, 202)
 		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		var img_url: String = str(MagicRules.get_card_attribute(c_node.card_data, "image_url", ""))
-		if not img_url.is_empty():
-			var cached_t = CardManager.get_cached_texture(img_url)
-			if cached_t: tex_rect.texture = cached_t
+		var card_tex: Texture2D = c_node.get_active_texture() if c_node.has_method("get_active_texture") else null
+		if card_tex: tex_rect.texture = card_tex
 		c_vbox.add_child(tex_rect)
 
 		var sel_btn := Button.new()
@@ -3583,3 +3798,265 @@ func show_player_station_preview(pid: int) -> void:
 func hide_player_station_preview() -> void:
 	if player_preview_panel and is_instance_valid(player_preview_panel):
 		player_preview_panel.visible = false
+
+
+var _dice_banner_canvas: CanvasLayer = null
+
+func show_dice_roll_banner(msg: String, btn_text: String = "", on_btn: Callable = Callable()) -> void:
+	if not (_dice_banner_canvas and is_instance_valid(_dice_banner_canvas)):
+		_dice_banner_canvas = CanvasLayer.new()
+		_dice_banner_canvas.name = "DiceRollBannerUI"
+		_dice_banner_canvas.layer = 108
+		engine.add_child(_dice_banner_canvas)
+
+		var panel := PanelContainer.new()
+		panel.name = "BannerPanel"
+		panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+		var half_w := clampf(engine.get_viewport().get_visible_rect().size.x * 0.44, 150.0, 310.0)
+		panel.offset_left = -half_w; panel.offset_right = half_w
+		panel.offset_top = 52; panel.offset_bottom = 112
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0.06, 0.10, 0.20, 0.94)
+		style.border_color = Color(0.84, 0.72, 0.40, 0.92)
+		style.set_border_width_all(2)
+		style.set_corner_radius_all(14)
+		style.content_margin_left = 20; style.content_margin_right = 20
+		style.content_margin_top = 12; style.content_margin_bottom = 12
+		panel.add_theme_stylebox_override("panel", style)
+		_dice_banner_canvas.add_child(panel)
+
+		var vbox := VBoxContainer.new()
+		vbox.name = "BannerVBox"
+		vbox.add_theme_constant_override("separation", 10)
+		panel.add_child(vbox)
+
+		var lbl := Label.new()
+		lbl.name = "BannerLbl"
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.add_theme_font_size_override("font_size", 16)
+		lbl.add_theme_color_override("font_color", Color(0.92, 0.80, 0.46, 1.0))
+		vbox.add_child(lbl)
+
+		var act_btn := Button.new()
+		act_btn.name = "BannerBtn"
+		act_btn.custom_minimum_size = Vector2(240, 40)
+		var b_style := StyleBoxFlat.new()
+		b_style.bg_color = Color(0.11, 0.20, 0.40, 1.0)
+		b_style.border_color = Color(0.86, 0.72, 0.36, 0.95)
+		b_style.set_border_width_all(2)
+		b_style.set_corner_radius_all(10)
+		act_btn.add_theme_stylebox_override("normal", b_style)
+		act_btn.add_theme_stylebox_override("hover", b_style)
+		act_btn.visible = false
+		vbox.add_child(act_btn)
+		apply_custom_font(_dice_banner_canvas)
+
+	var lbl_n := _dice_banner_canvas.get_node_or_null("BannerPanel/BannerVBox/BannerLbl") as Label
+	if lbl_n:
+		lbl_n.text = msg
+	var btn_n := _dice_banner_canvas.get_node_or_null("BannerPanel/BannerVBox/BannerBtn") as Button
+	if btn_n:
+		for conn in btn_n.pressed.get_connections():
+			btn_n.pressed.disconnect(conn["callable"])
+		if btn_text.is_empty():
+			btn_n.visible = false
+		else:
+			btn_n.text = btn_text
+			btn_n.visible = true
+			btn_n.disabled = false
+			btn_n.pressed.connect(func():
+				btn_n.disabled = true
+				if on_btn.is_valid():
+					on_btn.call()
+			)
+
+func hide_dice_roll_banner() -> void:
+	if _dice_banner_canvas and is_instance_valid(_dice_banner_canvas):
+		_dice_banner_canvas.queue_free()
+	_dice_banner_canvas = null
+
+func open_first_player_choice_popup(active_pids: Array[int], on_roll_d20: Callable, on_select_player: Callable) -> void:
+	var existing := engine.get_node_or_null("FirstPlayerChoiceUI")
+	if existing: existing.queue_free()
+
+	var popup := CanvasLayer.new()
+	popup.name = "FirstPlayerChoiceUI"
+	popup.layer = 112
+	engine.add_child(popup)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.55)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(center)
+
+	var panel := PanelContainer.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.06, 0.10, 0.20, 0.96)
+	style.border_color = Color(0.95, 0.78, 0.35, 0.95)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(16)
+	style.content_margin_left = 26; style.content_margin_right = 26
+	style.content_margin_top = 22; style.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 14)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "WHO GOES FIRST?"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 20)
+	title.add_theme_color_override("font_color", Color(0.96, 0.80, 0.36, 1.0))
+	vbox.add_child(title)
+
+	var roll_btn_style := StyleBoxFlat.new()
+	roll_btn_style.bg_color = Color(0.11, 0.20, 0.42, 1.0)
+	roll_btn_style.border_color = Color(0.95, 0.78, 0.35, 1.0)
+	roll_btn_style.set_border_width_all(2)
+	roll_btn_style.set_corner_radius_all(12)
+
+	var roll_btn := Button.new()
+	roll_btn.text = "Roll 20-Sided Dice (d20)"
+	roll_btn.custom_minimum_size = Vector2(340, 48)
+	roll_btn.add_theme_stylebox_override("normal", roll_btn_style)
+	roll_btn.add_theme_stylebox_override("hover", roll_btn_style)
+	roll_btn.add_theme_color_override("font_color", Color(0.98, 0.86, 0.48, 1.0))
+	roll_btn.pressed.connect(func():
+		popup.queue_free()
+		if on_roll_d20.is_valid():
+			on_roll_d20.call()
+	)
+	vbox.add_child(roll_btn)
+
+	var sep := HSeparator.new()
+	vbox.add_child(sep)
+
+	var sub := Label.new()
+	sub.text = "Or Select Starting Player:"
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_font_size_override("font_size", 13)
+	sub.add_theme_color_override("font_color", Color(0.75, 0.82, 0.94, 1.0))
+	vbox.add_child(sub)
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	vbox.add_child(grid)
+
+	var p_btn_style := StyleBoxFlat.new()
+	p_btn_style.bg_color = Color(0.14, 0.22, 0.38, 0.95)
+	p_btn_style.border_color = Color(0.55, 0.68, 0.92, 0.75)
+	p_btn_style.set_border_width_all(1)
+	p_btn_style.set_corner_radius_all(10)
+
+	for pid in active_pids:
+		var p_cap := pid
+		var pb := Button.new()
+		pb.text = "P%d — %s" % [p_cap, engine.get_player_display_name(p_cap)]
+		pb.custom_minimum_size = Vector2(165, 40)
+		pb.add_theme_stylebox_override("normal", p_btn_style)
+		pb.add_theme_stylebox_override("hover", p_btn_style)
+		pb.pressed.connect(func():
+			popup.queue_free()
+			if on_select_player.is_valid():
+				on_select_player.call(p_cap)
+		)
+		grid.add_child(pb)
+
+	apply_custom_font(popup)
+
+
+
+func open_proliferate_popup(candidates: Array, on_confirmed: Callable) -> void:
+	var existing := engine.get_node_or_null("ProliferateUI")
+	if existing: existing.queue_free()
+
+	var popup := CanvasLayer.new()
+	popup.name = "ProliferateUI"
+	popup.layer = 112
+	engine.add_child(popup)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.72)
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	popup.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(460, 0)
+	center.add_child(panel)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 18)
+	margin.add_theme_constant_override("margin_right", 18)
+	margin.add_theme_constant_override("margin_top", 16)
+	margin.add_theme_constant_override("margin_bottom", 16)
+	panel.add_child(margin)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	margin.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "PROLIFERATE — CHOOSE PERMANENTS & PLAYERS"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 15)
+	title.add_theme_color_override("font_color", Color(0.55, 0.92, 1.0, 1.0))
+	vbox.add_child(title)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(420, 240)
+	vbox.add_child(scroll)
+
+	var list_box := VBoxContainer.new()
+	list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list_box.add_theme_constant_override("separation", 6)
+	scroll.add_child(list_box)
+
+	var checks: Array[Dictionary] = []
+	for cand in candidates:
+		var cb := CheckBox.new()
+		cb.text = str(cand.get("label", "Target"))
+		cb.button_pressed = bool(cand.get("default_selected", true))
+		list_box.add_child(cb)
+		checks.append({"cb": cb, "cand": cand})
+
+	var btn_row := HBoxContainer.new()
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	btn_row.add_theme_constant_override("separation", 10)
+	vbox.add_child(btn_row)
+
+	var confirm_btn := Button.new()
+	confirm_btn.text = "Proliferate Selected"
+	confirm_btn.custom_minimum_size = Vector2(180, 40)
+	confirm_btn.pressed.connect(func():
+		var chosen: Array = []
+		for item in checks:
+			if (item["cb"] as CheckBox).button_pressed:
+				chosen.append(item["cand"])
+		popup.queue_free()
+		on_confirmed.call(chosen)
+	)
+	btn_row.add_child(confirm_btn)
+
+	var none_btn := Button.new()
+	none_btn.text = "None"
+	none_btn.custom_minimum_size = Vector2(90, 40)
+	none_btn.pressed.connect(func():
+		popup.queue_free()
+		on_confirmed.call([])
+	)
+	btn_row.add_child(none_btn)
+
+	apply_custom_font(popup)

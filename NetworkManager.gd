@@ -126,6 +126,10 @@ func disconnect_game() -> void:
 func _on_peer_connected(peer_id: int) -> void:
 	if not is_hosting:
 		return
+	if enet_peer:
+		var p_peer := enet_peer.get_peer(peer_id)
+		if p_peer:
+			p_peer.set_timeout(0, 5000, 30000)
 	var assigned_seat := -1
 	for s in [1, 2, 3, 4]:
 		if not seat_to_peer.has(s):
@@ -137,6 +141,11 @@ func _on_peer_connected(peer_id: int) -> void:
 	seat_to_peer[assigned_seat] = peer_id
 	seat_names[assigned_seat] = "Player %d (Peer %d)" % [assigned_seat, peer_id]
 	_sync_lobby_state.rpc(peer_to_seat, seat_to_peer, seat_names)
+	for s_k in seat_decks.keys():
+		_rpc_submit_deck.rpc_id(peer_id, int(s_k), seat_decks[s_k])
+	for s_k in seat_cosmetics.keys():
+		var cd: Dictionary = seat_cosmetics[s_k]
+		_rpc_submit_cosmetics.rpc_id(peer_id, int(s_k), cd.get("sleeve_bytes", PackedByteArray()), cd.get("playmat_bytes", PackedByteArray()))
 	lobby_updated.emit()
 
 func _on_peer_disconnected(peer_id: int) -> void:
@@ -149,7 +158,14 @@ func _on_peer_disconnected(peer_id: int) -> void:
 		seat_names.erase(seat_id)
 		seat_decks.erase(seat_id)
 		_sync_lobby_state.rpc(peer_to_seat, seat_to_peer, seat_names)
+		if not is_in_lobby:
+			_rpc_peer_dropped.rpc(seat_id)
 		lobby_updated.emit()
+
+@rpc("authority", "call_local", "reliable")
+func _rpc_peer_dropped(seat_id: int) -> void:
+	if engine and engine.hud_manager and engine.hud_manager.has_method("show_toast"):
+		engine.hud_manager.show_toast("Player %d disconnected — AI taking over Seat %d" % [seat_id, seat_id], Color(0.95, 0.72, 0.35, 1.0))
 
 func _on_connected_to_server() -> void:
 	var my_id := get_tree().get_multiplayer().get_unique_id()
@@ -163,6 +179,8 @@ func _on_connection_failed() -> void:
 func _on_server_disconnected() -> void:
 	disconnect_game()
 	connection_status_changed.emit("Host disconnected", false)
+	if engine and engine.hud_manager and engine.hud_manager.has_method("show_toast"):
+		engine.hud_manager.show_toast("Disconnected from Host — switched to offline mode", Color(0.95, 0.45, 0.35, 1.0))
 
 @rpc("authority", "call_local", "reliable")
 func _sync_lobby_state(p2s: Dictionary, s2p: Dictionary, s_names: Dictionary) -> void:
@@ -183,6 +201,9 @@ func submit_local_deck(deck_payload: Dictionary) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _rpc_submit_deck(seat_id: int, deck_payload: Dictionary) -> void:
+	var sender_id: int = multiplayer.get_remote_sender_id()
+	if is_hosting and sender_id != 0 and sender_id != 1 and peer_to_seat.has(sender_id):
+		seat_id = int(peer_to_seat[sender_id])
 	seat_decks[seat_id] = deck_payload
 	lobby_updated.emit()
 
@@ -204,6 +225,9 @@ func submit_local_cosmetics(sleeve_path: String, playmat_path: String) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func _rpc_submit_cosmetics(seat_id: int, sleeve_bytes: PackedByteArray, playmat_bytes: PackedByteArray) -> void:
+	var sender_id: int = multiplayer.get_remote_sender_id()
+	if is_hosting and sender_id != 0 and sender_id != 1 and peer_to_seat.has(sender_id):
+		seat_id = int(peer_to_seat[sender_id])
 	seat_cosmetics[seat_id] = {"sleeve_bytes": sleeve_bytes, "playmat_bytes": playmat_bytes}
 	lobby_updated.emit()
 

@@ -26,7 +26,8 @@ static var MANA_SYM_REGEX: RegEx
 
 static var KEYWORD_LIST: Array[String] = [
 	"flying", "first strike", "double strike", "deathtouch", "trample",
-	"vigilance", "lifelink", "haste", "reach", "indestructible", "hexproof", "shroud", "menace", "flash"
+	"vigilance", "lifelink", "haste", "reach", "indestructible", "hexproof", "shroud", "menace", "flash",
+	"defender", "fear", "intimidate", "skulk", "prowess", "exalted", "infect", "wither", "undying", "persist", "changeling"
 ]
 
 static func _static_init() -> void:
@@ -71,7 +72,7 @@ static func _ensure_regex_initialized() -> void:
 		UNEARTH_REGEX.compile("^Unearth[\\s—]+(\\{.+?\\}(?:\\{.+?\\})*)")
 	if LOYALTY_REGEX == null:
 		LOYALTY_REGEX = RegEx.new()
-		LOYALTY_REGEX.compile("^\\[?([+-]?(?:\\d+|X))\\]?:\\s*(.+)$")
+		LOYALTY_REGEX.compile("^\\[?([+\\-−]?(?:\\d+|X))\\]?:\\s*(.+)$")
 	if SAGA_REGEX == null:
 		SAGA_REGEX = RegEx.new()
 		SAGA_REGEX.compile("^([IVX]+(?:,\\s*[IVX]+)*)\\s*[—-]+\\s*(.+)$")
@@ -113,9 +114,12 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 		"modal": {"count": 0, "allow_repeat": false, "modes": []},
 		"additional_cost": {"type": "", "target": "", "amount": 0},
 		"loyalty_abilities": [],
+		"granted_loyalty_abilities": [],
 		"saga_chapters": [],
 		"saga_max_chapter": 0,
 		"ward_cost": "",
+		"kicker_cost": "",
+		"overload_cost": "",
 		"protection_from": [],
 		"hexproof_from": [],
 		"crew_cost": 0,
@@ -212,16 +216,36 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 			parsed_data["unearth_cost"] = un_m.get_string(1).strip_edges()
 			continue
 
+		# Planeswalker Loyalty Abilities granted inline in quotes (e.g. Ichormoon Gauntlet)
+		if "planeswalkers you control have" in line_lower:
+			var gl_rx := RegEx.new()
+			gl_rx.compile('["“]\\[?([+\\-−]?(?:\\d+|X))\\]?:\\s*([^"”]+)["”]')
+			var gl_matches := gl_rx.search_all(clean_line)
+			for gm in gl_matches:
+				var gd_str := gm.get_string(1).strip_edges().replace("−", "-")
+				var geff_raw := gm.get_string(2).strip_edges()
+				parsed_data["granted_loyalty_abilities"].append({
+					"delta_str": gd_str,
+					"effect_raw": geff_raw,
+					"target_requirement": extract_target_requirement(geff_raw)
+				})
+			if not gl_matches.is_empty():
+				continue
+
 		# Planeswalker Loyalty Abilities ([+1]: ..., [-2]: ..., [-X]: ...)
 		var loy_m := LOYALTY_REGEX.search(clean_line)
 		if loy_m:
-			var d_str := loy_m.get_string(1).strip_edges()
+			var d_str := loy_m.get_string(1).strip_edges().replace("−", "-")
 			var eff_raw := loy_m.get_string(2).strip_edges()
-			parsed_data["loyalty_abilities"].append({
+			var loy_dict := {
 				"delta_str": d_str,
 				"effect_raw": eff_raw,
 				"target_requirement": extract_target_requirement(eff_raw)
-			})
+			}
+			if "planeswalkers you control have" in full_lower:
+				parsed_data["granted_loyalty_abilities"].append(loy_dict)
+			else:
+				parsed_data["loyalty_abilities"].append(loy_dict)
 			continue
 
 		# Saga Chapters (I — ..., II, III — ...)
@@ -250,6 +274,19 @@ static func parse_oracle_text(oracle_text: String) -> Dictionary:
 			parsed_data["ward_cost"] = ward_m.get_string(1).strip_edges().to_upper()
 			if not ("ward" in parsed_data["keywords"]):
 				parsed_data["keywords"].append("ward")
+		elif line_lower.begins_with("ward — ") or line_lower.begins_with("ward - "):
+			var w_part := line_lower.substr(7).split("(")[0].strip_edges().trim_suffix(".")
+			parsed_data["ward_cost"] = w_part
+			if not ("ward" in parsed_data["keywords"]):
+				parsed_data["keywords"].append("ward")
+		var kick_rx := RegEx.new()
+		kick_rx.compile("^kicker\\s+((?:\\{[^\\}]+\\})+)")
+		var km := kick_rx.search(line_lower)
+		if km: parsed_data["kicker_cost"] = km.get_string(1).to_upper()
+		var ov_rx := RegEx.new()
+		ov_rx.compile("^overload\\s+((?:\\{[^\\}]+\\})+)")
+		var om := ov_rx.search(line_lower)
+		if om: parsed_data["overload_cost"] = om.get_string(1).to_upper()
 		var cm := CREW_REGEX.search(clean_line)
 		if cm: parsed_data["crew_cost"] = cm.get_string(1).to_int()
 

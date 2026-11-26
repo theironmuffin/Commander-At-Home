@@ -6,13 +6,15 @@ enum Difficulty { CASUAL, TUNED, CEDH }
 var engine: Node = null
 var difficulty: int = Difficulty.TUNED
 var _is_thinking: bool = false
+var _ai_free_actions_this_turn: int = 0
+var _ai_last_turn_num: int = -1
 var _responded_stack_ids: Dictionary = {}
 
 func setup(main_engine: Node) -> void:
 	engine = main_engine
 
 func should_ai_act_on_priority(pid: int) -> bool:
-	if not engine or not engine.turn_manager.auto_pass_opponents:
+	if not engine:
 		return false
 	if engine.is_network_multiplayer() and not engine.network_manager.is_hosting:
 		return false
@@ -43,7 +45,7 @@ func schedule_ai_action(pid: int) -> void:
 		_is_thinking = false
 		if not is_instance_valid(engine): return
 		var tm: TurnManager = engine.turn_manager
-		if not tm.auto_pass_opponents or tm.priority_player_id != pid: return
+		if tm.priority_player_id != pid: return
 		if engine.has_method("is_decision_popup_open") and engine.is_decision_popup_open():
 			schedule_ai_action(pid)
 			return
@@ -68,7 +70,11 @@ func _execute_ai_step(pid: int) -> void:
 			_run_ai_attackers(pid)
 	if engine.is_network_multiplayer() and engine.network_manager.is_hosting and engine.has_method("sync_network_state"):
 		engine.sync_network_state()
-	if took_free_action and engine.active_stack.is_empty():
+	if tm.turn_number != _ai_last_turn_num:
+		_ai_last_turn_num = tm.turn_number
+		_ai_free_actions_this_turn = 0
+	if took_free_action and engine.active_stack.is_empty() and _ai_free_actions_this_turn < 12:
+		_ai_free_actions_this_turn += 1
 		schedule_ai_action(pid)
 	else:
 		tm.pass_priority()
@@ -321,12 +327,10 @@ func assign_ai_blockers() -> void:
 
 		var my_life: int = int(engine.player_life.get(pid, 40))
 		for atk in incoming:
-			var atk_flying: bool = atk.has_method("has_keyword") and bool(atk.has_keyword("flying"))
 			var atk_menace: bool = atk.has_method("has_keyword") and bool(atk.has_keyword("menace"))
 			var valid_defs: Array[Node3D] = []
 			for d in defenders:
-				var can_reach: bool = d.has_method("has_keyword") and (bool(d.has_keyword("flying")) or bool(d.has_keyword("reach")))
-				if not atk_flying or can_reach:
+				if CombatManager.can_creature_block(atk, d):
 					valid_defs.append(d)
 
 			var needed := 2 if atk_menace else 1

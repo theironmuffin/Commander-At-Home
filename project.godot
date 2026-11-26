@@ -13,6 +13,7 @@ config_version=5
 config/name="Commander At Home"
 run/main_scene="uid://br2ang02p1ih4"
 config/features=PackedStringArray("4.7", "GL Compatibility")
+boot_splash/bg_color=Color(0.07058824, 0.08627451, 0.1254902, 1)
 boot_splash/image="uid://b2i2dobdbd7r2"
 config/icon="uid://dhtcf0akneogf"
 

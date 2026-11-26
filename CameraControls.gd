@@ -10,7 +10,10 @@ extends Camera3D
 @export var zoom_speed: float = 1.2
 @export var zoom_smoothness: float = 10.0
 @export var min_zoom: float = 3.0
-@export var max_zoom: float = 25.0
+@export var max_zoom: float = 9.6
+@export var room_bounds_xz: float = 17.5
+@export var room_min_y: float = 1.2
+@export var room_max_y: float = 9.6
 @export var stick_deadzone: float = 0.18
 @export var trigger_zoom_speed: float = 12.0
 @export var stick_look_speed: float = 1.8
@@ -69,6 +72,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _touches.size() == 1:
 			if _touch_on_hand_card: return
 			translate(Vector3(-event.relative.x * touch_pan_speed, event.relative.y * touch_pan_speed, 0.0))
+			_clamp_to_room_bounds()
 			get_viewport().set_input_as_handled()
 		elif _touches.size() == 2:
 			var keys: Array = _touches.keys()
@@ -146,6 +150,7 @@ func _process(delta: float) -> void:
 	if input_dir != Vector3.ZERO:
 		var current_speed := move_speed * (fast_multiplier if Input.is_key_pressed(KEY_SHIFT) else 1.0)
 		translate(input_dir.normalized() * current_speed * delta)
+	_clamp_to_room_bounds()
 
 func reset_to_home() -> void:
 	target_y = home_position.y
@@ -163,3 +168,9 @@ func reset_to_home() -> void:
 		rotation = home_rotation
 		target_y = home_position.y
 	)
+
+func _clamp_to_room_bounds() -> void:
+	position.x = clampf(position.x, -room_bounds_xz, room_bounds_xz)
+	position.z = clampf(position.z, -room_bounds_xz, room_bounds_xz)
+	position.y = clampf(position.y, room_min_y, room_max_y)
+	target_y = clampf(target_y, room_min_y, room_max_y)

@@ -86,3 +86,33 @@ func store_image_to_cache(url: String, body: PackedByteArray) -> Texture2D:
 	var tex := ImageTexture.create_from_image(img)
 	_texture_cache[url] = tex
 	return tex
+
+var _in_flight_art: Dictionary = {}
+
+func fetch_texture_deduped(url: String, on_ready: Callable) -> void:
+	if url.is_empty(): return
+	var cached := get_cached_image_texture(url)
+	if cached != null:
+		if on_ready.is_valid(): on_ready.call(cached)
+		return
+	if _in_flight_art.has(url):
+		(_in_flight_art[url] as Array).append(on_ready)
+		return
+	_in_flight_art[url] = [on_ready]
+	var http := HTTPRequest.new()
+	add_child(http)
+	var req_id := http.get_instance_id()
+	http.request_completed.connect(func(_res, code, _hdr, body):
+		var r := instance_from_id(req_id)
+		if r and is_instance_valid(r): r.queue_free()
+		var waiters: Array = _in_flight_art.get(url, [])
+		_in_flight_art.erase(url)
+		var tex: Texture2D = store_image_to_cache(url, body) if code == 200 else null
+		for cb in waiters:
+			if cb is Callable and (cb as Callable).is_valid():
+				(cb as Callable).call(tex)
+	)
+	var err := http.request(url, ["User-Agent: MTGBrawlSim/1.0", "Accept: */*"])
+	if err != OK:
+		_in_flight_art.erase(url)
+		http.queue_free()

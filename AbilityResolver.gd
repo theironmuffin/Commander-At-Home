@@ -16,7 +16,7 @@ static func _ensure_regex() -> void:
 		_PT_REGEX.compile("([+-]\\d+)/([+-]\\d+)")
 	if _TOKEN_PT_REGEX == null:
 		_TOKEN_PT_REGEX = RegEx.new()
-		_TOKEN_PT_REGEX.compile("(\\d+)/(\\d+)\\s+([a-zA-Z\\s]+?)\\s+creature token")
+		_TOKEN_PT_REGEX.compile("(\\d+|x)/(\\d+|x)\\s+([a-zA-Z\\s]+?)\\s+creature token")
 	if _MANA_SYM_REGEX == null:
 		_MANA_SYM_REGEX = RegEx.new()
 		_MANA_SYM_REGEX.compile("\\{([WUBRGC])\\}")
@@ -104,50 +104,158 @@ static func execute_effect_text(effect_text: String, source_card: Variant = null
 	var owner_id: int = controller_id_override if controller_id_override > 0 else (engine_main.get_card_owner_id(valid_source) if (engine_main and valid_source) else 1)
 	if engine_main:
 		engine_main.set_meta("last_linked_exile_card", {})
+		if valid_target is Node3D and is_instance_valid(valid_target):
+			engine_main.set_meta("last_target_controller_id", engine_main.get_card_controller_id(valid_target))
+		else:
+			engine_main.set_meta("last_target_controller_id", -1)
 		engine_main.set_meta("spell_chosen_creature_type", "")
 
 	var cleaned := _REMINDER_REGEX.sub(effect_text, "", true).strip_edges()
+	var cl_low := cleaned.to_lower()
+	if "exile the top " in cl_low and "at the beginning of the next end step" in cl_low and ("remain exiled" in cl_low or "eldrazi spawn" in cl_low):
+		var ex_amt := _extract_number(cl_low, "exile the top ")
+		var exiled_cards := _handle_impulse_exile_cards(ex_amt, engine_main, owner_id)
+		if engine_main and engine_main.turn_manager:
+			engine_main.turn_manager.delayed_triggers.append({
+				"phase": TurnManager.TurnPhase.END,
+				"owner_id": owner_id,
+				"callback": func():
+					if not is_instance_valid(engine_main): return
+					var ex_arr: Array = engine_main.exile_stack if owner_id == engine_main.local_player_id else engine_main.player_exile.get(owner_id, [])
+					var gy_cnt := 0
+					for ec in exiled_cards:
+						if is_instance_valid(ec) and (ec in ex_arr):
+							ex_arr.erase(ec)
+							if ec.has_meta("playable_from_exile"): ec.remove_meta("playable_from_exile")
+							if ec.has_meta("playable_by_pid"): ec.remove_meta("playable_by_pid")
+							engine_main._on_card_to_graveyard(ec)
+							gy_cnt += 1
+					if gy_cnt > 0 and engine_main.has_method("_spawn_new_token"):
+						var spawn_data := {
+							"name": "Eldrazi Spawn",
+							"type_line": "Token Creature — Eldrazi Spawn",
+							"mana_cost": "",
+							"cmc": 0,
+							"colors": [],
+							"power": "0",
+							"toughness": "1",
+							"oracle_text": "Sacrifice this creature: Add {C}."
+						}
+						for _si in range(gy_cnt):
+							engine_main._spawn_new_token(spawn_data, owner_id)
+					if engine_main.zone_manager:
+						engine_main.zone_manager.update_zone_counters()
+			})
+		return
 	var clauses := _split_clauses(cleaned)
 
-	for ci in range(clauses.size()):
-		var clause: String = clauses[ci]
-		if "choose a creature type" in clause.to_lower() and engine_main:
-			var types: Array[String] = engine_main._collect_deck_creature_types(owner_id) if engine_main.has_method("_collect_deck_creature_types") else ["Human", "Elf", "Goblin", "Wizard", "Dragon"]
-			for bp in engine_main.battlefield_non_lands:
-				if is_instance_valid(bp) and MagicRules.is_creature(bp.card_data):
-					var b_tl := MagicRules.get_card_type_line(bp.card_data)
-					if "—" in b_tl:
-						for st_w in b_tl.split("—")[1].strip_edges().split(" "):
-							var cw := st_w.strip_edges()
-							if not cw.is_empty() and not (cw in types): types.append(cw)
-			if owner_id == engine_main.local_player_id and engine_main.hud_manager and engine_main.hud_manager.has_method("open_etb_creature_type_popup"):
-				var rem_clauses := clauses.slice(ci + 1)
-				var dummy_card := valid_source if valid_source != null else Node3D.new()
-				engine_main.hud_manager.open_etb_creature_type_popup(dummy_card, types, func(chosen_t: String):
-					engine_main.set_meta("spell_chosen_creature_type", chosen_t)
-					for rc in rem_clauses:
-						_execute_clause_with_conditions(rc, valid_source, valid_target, engine_main, owner_id)
-					engine_main.run_state_based_actions()
-				)
-				return
-			else:
-				engine_main.set_meta("spell_chosen_creature_type", types[0] if not types.is_empty() else "Human")
-				continue
-		_execute_clause_with_conditions(clause, valid_source, valid_target, engine_main, owner_id)
+	_run_clause_chain(clauses, 0, valid_source, valid_target, engine_main, owner_id, true)
 
-static func _execute_clause_with_conditions(clause: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> void:
-	var c := clause.strip_edges()
+static func _run_clause_chain(clauses: Array[String], idx: int, source: Node3D, target: Variant, engine: Node, owner_id: int, last_succeeded: bool) -> void:
+	if idx >= clauses.size():
+		if engine and engine.has_method("run_state_based_actions"):
+			engine.run_state_based_actions()
+		return
+	var c := clauses[idx].strip_edges()
 	var c_lower := c.to_lower()
 
-	# Handle leading "If <condition>, <effect>"
+	if "choose a creature type" in c_lower and engine:
+		var types: Array[String] = engine._collect_deck_creature_types(owner_id) if engine.has_method("_collect_deck_creature_types") else ["Human", "Elf", "Goblin", "Wizard", "Dragon"]
+		for bp in engine.battlefield_non_lands:
+			if is_instance_valid(bp) and MagicRules.is_creature(bp.card_data, 0, bp):
+				var b_tl := MagicRules.get_card_type_line(bp.card_data)
+				if "—" in b_tl:
+					for st_w in b_tl.split("—")[1].strip_edges().split(" "):
+						var cw := st_w.strip_edges()
+						if not cw.is_empty() and not (cw in types): types.append(cw)
+		if owner_id == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_etb_creature_type_popup"):
+			var dummy_card := source if source != null else Node3D.new()
+			engine.hud_manager.open_etb_creature_type_popup(dummy_card, types, func(chosen_t: String):
+				engine.set_meta("spell_chosen_creature_type", chosen_t)
+				_run_clause_chain(clauses, idx + 1, source, target, engine, owner_id, true)
+			)
+			return
+		else:
+			engine.set_meta("spell_chosen_creature_type", types[0] if not types.is_empty() else "Human")
+			_run_clause_chain(clauses, idx + 1, source, target, engine, owner_id, true)
+			return
+
+	# Handle leading "If <condition>, <effect>" including "If you do," and "If you don't,"
 	if c_lower.begins_with("if ") and "," in c:
 		var comma_idx := c.find(",")
-		var cond_str := c.substr(3, comma_idx - 3).strip_edges()
+		var cond_str := c.substr(3, comma_idx - 3).strip_edges().to_lower()
 		var inner_eff := c.substr(comma_idx + 1).strip_edges()
-		if not evaluate_condition(cond_str, source, engine, owner_id):
+		var cond_ok := false
+		if cond_str == "you do" or cond_str == "you did" or cond_str == "you win the flip" or cond_str == "it comes up heads" or cond_str.begins_with("you discard") or cond_str.begins_with("a card is discarded"):
+			cond_ok = last_succeeded
+		elif cond_str == "you don't" or cond_str == "you didn't":
+			cond_ok = not last_succeeded
+		else:
+			cond_ok = evaluate_condition(cond_str, source, engine, owner_id)
+		if not cond_ok:
+			_run_clause_chain(clauses, idx + 1, source, target, engine, owner_id, false)
 			return
 		c = inner_eff
 		c_lower = c.to_lower()
+
+	var next_step := func(did_ok: bool):
+		_run_clause_chain(clauses, idx + 1, source, target, engine, owner_id, did_ok)
+
+	# Handle "<action> unless that player / its controller / they pays {cost}" (e.g. Rhystic Study, Mystic Remora, Esper Sentinel)
+	var tax_rx := RegEx.new()
+	tax_rx.compile("^(.*?)\\s+unless\\s+(?:that player|its controller|they)\\s+pays?\\s+((?:\\{[^\\}]+\\})+)")
+	var tax_m := tax_rx.search(c_lower)
+	if tax_m:
+		var inner_eff := tax_m.get_string(1).strip_edges()
+		var tax_cost := tax_m.get_string(2).strip_edges().to_upper()
+		var taxed_pid: int = -1
+		if target is int and int(target) > 0:
+			taxed_pid = int(target)
+		elif target is Node3D and is_instance_valid(target) and engine:
+			taxed_pid = engine.get_card_owner_id(target)
+		elif engine and engine.turn_manager:
+			taxed_pid = engine.turn_manager.active_player_id
+		var src_name := str(source.card_data.get("name", "Trigger")) if source else "Trigger"
+		var run_taxed_eff := func():
+			if inner_eff.begins_with("you may "):
+				var may_act := inner_eff.substr(8).strip_edges()
+				if engine and owner_id == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_choice_popup"):
+					engine.hud_manager.open_choice_popup(
+						"%s (Optional)" % src_name.to_upper(),
+						["Yes: %s" % may_act.capitalize(), "No (Decline)"],
+						func(choice_idx: int):
+							if choice_idx == 0:
+								_execute_clause_async(may_act, source, target, engine, owner_id, next_step)
+							else:
+								next_step.call(false)
+					)
+					return
+				_execute_clause_async(may_act, source, target, engine, owner_id, next_step)
+			else:
+				_execute_clause_async(inner_eff, source, target, engine, owner_id, next_step)
+
+		if taxed_pid > 0 and engine:
+			if taxed_pid == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_choice_popup"):
+				engine.hud_manager.open_choice_popup(
+					"%s — PAY %s?" % [src_name.to_upper(), tax_cost],
+					["Pay %s" % tax_cost, "Decline (%s)" % inner_eff.capitalize()],
+					func(p_idx: int):
+						if p_idx == 0 and engine.can_pay_and_drain_cost(tax_cost, taxed_pid, {}):
+							if engine.event_ledger:
+								engine.event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": "P%d paid %s for %s" % [taxed_pid, tax_cost, src_name]})
+							next_step.call(false)
+						else:
+							run_taxed_eff.call()
+				)
+				return
+			elif taxed_pid != engine.local_player_id:
+				if engine.can_pay_and_drain_cost(tax_cost, taxed_pid, {}):
+					if engine.event_ledger:
+						engine.event_ledger.log_event(GameEventLedger.EventType.STACK_RESOLVED, {"card_name": "P%d paid %s for %s" % [taxed_pid, tax_cost, src_name]})
+					next_step.call(false)
+					return
+		run_taxed_eff.call()
+		return
 
 	# Handle "You may <effect>" interactively for local player
 	if c_lower.begins_with("you may "):
@@ -159,14 +267,37 @@ static func _execute_clause_with_conditions(clause: String, source: Node3D, targ
 				["Yes: %s" % inner_action.capitalize(), "No (Decline)"],
 				func(choice_idx: int):
 					if choice_idx == 0:
-						_execute_clause(inner_action, source, target, engine, owner_id)
-						engine.run_state_based_actions()
+						_execute_clause_async(inner_action, source, target, engine, owner_id, next_step)
+					else:
+						next_step.call(false)
 			)
 			return
-		# AI defaults to taking beneficial optional abilities
 		c = inner_action
 
-	_execute_clause(c, source, target, engine, owner_id)
+	_execute_clause_async(c, source, target, engine, owner_id, next_step)
+
+static func _execute_clause_async(clause: String, source: Node3D, target: Variant, engine: Node, owner_id: int, on_done: Callable) -> void:
+	var c_l := clause.strip_edges().to_lower()
+	if "flip a coin" in c_l and engine and engine.has_method("flip_3d_coin_for_player"):
+		var won: bool = engine.flip_3d_coin_for_player(owner_id, str(source.card_data.get("name", "")) if source else "")
+		on_done.call(won)
+		return
+	if ("roll a d20" in c_l or "roll a twenty-sided die" in c_l) and engine and engine.has_method("roll_3d_die_for_player"):
+		var r20: int = engine.roll_3d_die_for_player(owner_id, 20, str(source.card_data.get("name", "")) if source else "")
+		on_done.call(r20 >= 10)
+		return
+	if ("roll a d6" in c_l or "roll a six-sided die" in c_l) and engine and engine.has_method("roll_3d_die_for_player"):
+		var r6: int = engine.roll_3d_die_for_player(owner_id, 6, str(source.card_data.get("name", "")) if source else "")
+		on_done.call(r6 >= 4)
+		return
+	if c_l == "proliferate" or c_l.begins_with("proliferate "):
+		_handle_proliferate(engine, owner_id, on_done)
+		return
+	if "discard" in c_l and not ("each opponent discards" in c_l and false):
+		_handle_discard(c_l, target, engine, owner_id, on_done)
+		return
+	_execute_clause(clause, source, target, engine, owner_id)
+	on_done.call(true)
 
 static func _split_clauses(text: String) -> Array[String]:
 	var out: Array[String] = []
@@ -237,6 +368,16 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		_handle_put_linked_exile_to_gy(source, engine); return
 	if "search your library" in c:
 		_handle_library_search(c, engine, owner_id); return
+	if ("whenever a player taps" in c or "whenever you tap" in c) and "for mana" in c and engine and "eot_mana_bonuses" in engine:
+		var flt := "land"
+		for l_sub in ["island", "swamp", "mountain", "forest", "plains"]:
+			if l_sub in c: flt = l_sub; break
+		var add_col := ""
+		for sm in _MANA_SYM_REGEX.search_all(c.to_upper()):
+			add_col = sm.get_string(1)
+			break
+		engine.eot_mana_bonuses.append({"filter": flt, "add_color": add_col, "all_players": "a player" in c, "owner_id": owner_id})
+		return
 	if "become the monarch" in c or "becomes the monarch" in c:
 		if engine: engine.set_monarch(owner_id)
 		return
@@ -251,7 +392,7 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		if engine:
 			engine.modify_player_counter(owner_id, "ring", 1)
 			for p in engine.battlefield_non_lands:
-				if is_instance_valid(p) and engine.get_card_owner_id(p) == owner_id and MagicRules.is_creature(p.card_data):
+				if is_instance_valid(p) and engine.get_card_owner_id(p) == owner_id and MagicRules.is_creature(p.card_data, 0, p):
 					if p.has_method("set_custom_status"):
 						p.set_custom_status("Ring-bearer", true)
 						break
@@ -297,29 +438,55 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 				var amt_cp := _extract_number(c, "create ")
 				for _ci in range(amt_cp): engine._spawn_new_token(cd)
 			return
-		_handle_create_tokens(c, engine); return
+		_handle_create_tokens(c, engine, owner_id, target); return
 	if "draw " in c and ("card" in c or c.ends_with("draws")):
 		_handle_draw(c, engine, owner_id, target); return
+	if "manifest dread" in c:
+		_handle_manifest_dread(engine, owner_id); return
+	if ("manifests the top card" in c or "manifest the top card" in c) and "library" in c:
+		_handle_manifest_top(c, target, engine, owner_id); return
 	if "exile the top " in c and "library" in c:
 		_handle_impulse_exile(c, engine, owner_id); return
-	if "mill " in c:
-		_handle_mill(c, engine, owner_id); return
+	if "mill " in c or "mills " in c:
+		_handle_mill(c, target, engine, owner_id); return
 	if "discard " in c:
 		_handle_discard(c, target, engine, owner_id); return
 	if "deals " in c and " damage" in c:
 		_handle_damage(c, source, target, engine, owner_id); return
 	if " life" in c and ("gain " in c or "lose " in c or "loses " in c or "pay " in c):
 		_handle_life(c, engine, owner_id, target); return
+	if "empower jace" in c:
+		_handle_empower_jace(c, engine, owner_id); return
 	if "look at the top " in c and "library" in c:
 		_handle_look_top_cards(c, engine, owner_id); return
 	if c.begins_with("scry ") or " scry " in c:
 		_handle_scry_or_surveil(c, engine, owner_id, false); return
 	if c.begins_with("surveil ") or " surveil " in c:
 		_handle_scry_or_surveil(c, engine, owner_id, true); return
+	if "at the beginning of the next end step" in c and engine and engine.turn_manager:
+		var eff_part := c.substr(c.find(",") + 1).strip_edges() if "," in c else c
+		engine.turn_manager.delayed_triggers.append({"phase": TurnManager.TurnPhase.END, "effect": eff_part, "source": source, "target": target, "owner_id": owner_id})
+		return
+	if "take an extra turn" in c and engine and engine.turn_manager:
+		engine.turn_manager.extra_turn_queue.append(owner_id)
+		return
+	if "additional combat phase" in c and engine and engine.turn_manager:
+		engine.turn_manager.extra_combat_phases += 1
+		return
 	if "gain control of " in c:
 		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
 			n.set_meta("control_override_player_id", owner_id)
+			if "until end of turn" in c: n.set_meta("control_until_eot", true)
+			engine.zone_manager.update_battlefield_positions(true)
 		return
+	if "exile " in c and ("return it" in c or "return that card" in c) and "battlefield" in c:
+		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
+			if engine:
+				engine._on_card_to_exile(n)
+				engine.zone_manager.move_to_battlefield_from_zone(n, owner_id if "your control" in c else engine.get_card_owner_id(n), "tapped" in c)
+		return
+	if ("becomes a " in c or "become a " in c) and ("creature" in c or "base power" in c):
+		_handle_animate_permanent(c, source, target, engine, owner_id); return
 	if "base power and toughness " in c:
 		_handle_set_base_pt(c, source, target, engine, owner_id); return
 	if "switch " in c and "power and toughness" in c:
@@ -342,7 +509,7 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		if _PT_REGEX.search(c) == null: return
 	if "until end of turn" in c and (_PT_REGEX.search(c) != null or ("+x/+x" in c and "difference between its power and toughness" in c)):
 		_handle_temp_pt(c, source, target, engine, owner_id); return
-	if " counter" in c:
+	if "{e}" in c or "energy counter" in c or " counter" in c:
 		_handle_counters(c, source, target, engine, owner_id); return
 	if c.begins_with("exile ") or " exile " in c:
 		var is_ltb_exile := ("until " in c and "leaves the battlefield" in c)
@@ -356,6 +523,9 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 	if c.begins_with("destroy ") or " destroy " in c:
 		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
 			if n.has_method("has_keyword") and bool(n.has_keyword("indestructible")): continue
+			if n.has_method("get_named_counter") and n.get_named_counter("shield") > 0:
+				n.modify_named_counter("shield", -1)
+				continue
 			if engine: engine._on_card_to_graveyard(n)
 		return
 	if ("return " in c or "put " in c) and ("onto the battlefield" in c or "to the battlefield" in c) and target is Node3D and is_instance_valid(target):
@@ -371,7 +541,11 @@ static func _execute_clause(clause: String, source: Node3D, target: Variant, eng
 		return
 	if c.begins_with("untap ") or " untap target" in c or " untap all" in c:
 		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
-			if n.is_tapped: n.toggle_tap()
+			if n.is_tapped:
+				if n.has_method("get_named_counter") and n.get_named_counter("stun") > 0:
+					n.modify_named_counter("stun", -1)
+				else:
+					n.toggle_tap()
 		return
 	if "attach " in c and engine:
 		if source and is_instance_valid(source) and target is Node3D and is_instance_valid(target):
@@ -394,29 +568,137 @@ static func _handle_draw(c: String, engine: Node, owner_id: int, target: Variant
 			if pid == engine.local_player_id: engine.draw_card()
 			else: engine._draw_opponent_card(pid)
 
-static func _handle_impulse_exile(c: String, engine: Node, owner_id: int) -> void:
-	if not engine or owner_id != engine.local_player_id: return
-	var amount := _extract_number(c, "exile the top ")
+static func _handle_impulse_exile_cards(amount: int, engine: Node, owner_id: int) -> Array[Node3D]:
+	var exiled: Array[Node3D] = []
+	if not engine: return exiled
+	var lib: Array = engine.library_stack if owner_id == engine.local_player_id else engine.player_libraries.get(owner_id, [])
 	for i in range(amount):
-		if engine.library_stack.is_empty(): break
-		var top_card: Node3D = engine.library_stack.pop_back()
-		if top_card.has_method("make_active"): top_card.make_active(top_card.card_data)
-		engine.connect_card_signals(top_card)
-		engine._on_card_to_exile(top_card)
-
-static func _handle_mill(c: String, engine: Node, owner_id: int) -> void:
-	if not engine: return
-	var amount := _extract_number(c, "mill ")
-	if owner_id == engine.local_player_id:
-		for i in range(amount):
-			if engine.library_stack.is_empty(): break
-			var top_card: Node3D = engine.library_stack.pop_back()
+		if lib.is_empty(): break
+		var top_card: Node3D = lib.pop_back()
+		if owner_id == engine.local_player_id:
+			engine.player_libraries.get(owner_id, []).erase(top_card)
+		if is_instance_valid(top_card):
 			if top_card.has_method("make_active"): top_card.make_active(top_card.card_data)
 			engine.connect_card_signals(top_card)
-			engine._on_card_to_graveyard(top_card)
+			top_card.set_meta("playable_from_exile", true)
+			top_card.set_meta("playable_by_pid", owner_id)
+			if engine.turn_manager:
+				top_card.set_meta("playable_until_turn", engine.turn_manager.turn_number)
+			engine._on_card_to_exile(top_card)
+			exiled.append(top_card)
+	if engine.zone_manager:
+		engine.zone_manager.update_zone_counters()
+	return exiled
 
-static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: int) -> void:
+static func _handle_impulse_exile(c: String, engine: Node, owner_id: int) -> void:
+	var amount := _extract_number(c, "exile the top ")
+	_handle_impulse_exile_cards(amount, engine, owner_id)
+
+static func _manifest_card_node(card_node: Node3D, pid: int, engine: Node) -> void:
+	if not is_instance_valid(card_node) or not engine or not engine.zone_manager: return
+	var real_data: Dictionary = card_node.card_data.duplicate(true)
+	card_node.set_meta("is_manifested", true)
+	card_node.set_meta("manifested_card_data", real_data)
+	var face_down_data := {
+		"name": "Manifested Creature",
+		"type_line": "Creature",
+		"mana_cost": "",
+		"cmc": 0,
+		"colors": [],
+		"power": "2",
+		"toughness": "2",
+		"oracle_text": "Face-down 2/2 manifested creature (Pay its mana cost anytime to turn face up if it's a creature card)."
+	}
+	card_node.card_data = face_down_data
+	if card_node.has_method("make_active"): card_node.make_active(face_down_data)
+	engine.zone_manager.move_to_battlefield_from_zone(card_node, pid, false)
+
+static func _handle_manifest_top(c: String, target: Variant, engine: Node, owner_id: int) -> void:
 	if not engine: return
+	var pid: int = owner_id
+	if "its controller" in c and target is Node3D and is_instance_valid(target):
+		pid = engine.get_card_owner_id(target)
+	elif "target " in c and target is int:
+		pid = int(target)
+	var lib: Array = engine.library_stack if pid == engine.local_player_id else engine.player_libraries.get(pid, [])
+	if lib.is_empty(): return
+	var top_c: Node3D = lib.pop_back()
+	if pid == engine.local_player_id:
+		engine.player_libraries.get(pid, []).erase(top_c)
+	_manifest_card_node(top_c, pid, engine)
+	if engine.zone_manager: engine.zone_manager.update_zone_counters()
+
+static func _handle_manifest_dread(engine: Node, owner_id: int) -> void:
+	if not engine: return
+	var lib: Array = engine.library_stack if owner_id == engine.local_player_id else engine.player_libraries.get(owner_id, [])
+	if lib.is_empty(): return
+	var top_cards: Array[Node3D] = []
+	for _i in range(mini(2, lib.size())):
+		var tc: Node3D = lib.pop_back()
+		if owner_id == engine.local_player_id:
+			engine.player_libraries.get(owner_id, []).erase(tc)
+		if is_instance_valid(tc): top_cards.append(tc)
+	if top_cards.is_empty(): return
+	if top_cards.size() == 1:
+		_manifest_card_node(top_cards[0], owner_id, engine)
+		return
+	if owner_id == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_zone_viewer"):
+		engine.hud_manager.open_zone_viewer("MANIFEST DREAD — CHOOSE 1 TO MANIFEST (OTHER -> GRAVEYARD)", top_cards, owner_id, func(chosen: Node3D):
+			for tc in top_cards:
+				if tc == chosen:
+					_manifest_card_node(tc, owner_id, engine)
+				else:
+					if tc.has_method("make_active"): tc.make_active(tc.card_data)
+					engine.connect_card_signals(tc)
+					engine._on_card_to_graveyard(tc)
+			if engine.zone_manager: engine.zone_manager.update_zone_counters()
+		)
+	else:
+		var pick: Node3D = top_cards[0]
+		for tc in top_cards:
+			if MagicRules.is_creature(tc.card_data):
+				pick = tc; break
+		for tc in top_cards:
+			if tc == pick:
+				_manifest_card_node(tc, owner_id, engine)
+			else:
+				engine._on_card_to_graveyard(tc)
+		if engine.zone_manager: engine.zone_manager.update_zone_counters()
+
+static func _handle_mill(c: String, target: Variant, engine: Node, owner_id: int) -> void:
+	if not engine: return
+	var is_half_lib: bool = ("half" in c and "library" in c)
+	var base_amount := _extract_number(c, "mills " if "mills " in c else "mill ")
+	for pid in _resolve_affected_players(c, engine, owner_id, target):
+		var lib: Array = engine.library_stack if pid == engine.local_player_id else engine.player_libraries.get(pid, [])
+		var amount: int = base_amount
+		if is_half_lib:
+			var lib_cnt: int = lib.size()
+			amount = ceili(float(lib_cnt) / 2.0) if ("rounded up" in c) else int(floor(float(lib_cnt) / 2.0))
+		if amount > 0:
+			for perm in engine.battlefield_non_lands + engine.battlefield_lands:
+				if not is_instance_valid(perm) or not perm.is_on_battlefield: continue
+				var p_ol: String = str(MagicRules.get_card_attribute(perm.card_data, "oracle_text", "")).to_lower()
+				if "would mill" in p_ol and "twice that many" in p_ol:
+					var p_owner: int = engine.get_card_owner_id(perm)
+					if ("an opponent would mill" in p_ol and pid != p_owner) or ("you would mill" in p_ol and pid == p_owner) or ("a player would mill" in p_ol):
+						amount *= 2
+		for i in range(amount):
+			if lib.is_empty(): break
+			var top_card: Node3D = lib.pop_back()
+			if pid == engine.local_player_id:
+				engine.player_libraries.get(pid, []).erase(top_card)
+			if is_instance_valid(top_card):
+				if top_card.has_method("make_active"): top_card.make_active(top_card.card_data)
+				engine.connect_card_signals(top_card)
+				engine._on_card_to_graveyard(top_card)
+		if engine.zone_manager:
+			engine.zone_manager.update_zone_counters()
+
+static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: int, on_done: Callable = Callable()) -> void:
+	if not engine:
+		if on_done.is_valid(): on_done.call(false)
+		return
 	var amount := _extract_number(c, "discard ")
 	var is_random := "at random" in c
 	var target_pids: Array[int] = []
@@ -433,11 +715,14 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 	else:
 		target_pids.append(owner_id)
 
+	var did_any_discard := false
+	var waiting_human_discard := false
 	for pid in target_pids:
 		var hand_arr: Array = engine.hand_cards if pid == engine.local_player_id else engine.player_hands.get(pid, [])
 		if hand_arr.is_empty(): continue
 		var count: int = mini(amount, hand_arr.size())
 		if is_random:
+			did_any_discard = true
 			for i in range(count):
 				if hand_arr.is_empty(): break
 				var idx := randi() % hand_arr.size()
@@ -452,6 +737,7 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 				engine._on_card_to_graveyard(card_to_discard)
 		elif pid == engine.local_player_id:
 			if hand_arr.size() <= count:
+				did_any_discard = true
 				for i in range(count):
 					if hand_arr.is_empty(): break
 					var card_to_discard: Node3D = hand_arr.pop_back()
@@ -459,9 +745,10 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 					engine._on_card_to_graveyard(card_to_discard)
 				engine.zone_manager.update_hand_positions(true)
 			else:
-				engine.hud_manager.open_discard_choice(count)
+				waiting_human_discard = true
+				engine.hud_manager.open_discard_choice(count, on_done)
 		else:
-			# AI chooses least valuable card(s) to discard (excess lands or highest CMC)
+			did_any_discard = true
 			for i in range(count):
 				if hand_arr.is_empty(): break
 				var best_card: Node3D = hand_arr[0]
@@ -476,7 +763,12 @@ static func _handle_discard(c: String, target: Variant, engine: Node, owner_id: 
 				hand_arr.erase(best_card)
 				if best_card.has_method("make_active"): best_card.make_active(best_card.card_data)
 				engine.zone_manager.update_opponent_hand_positions(pid, true)
-				engine.handle_discard_with_madness(best_card, pid) if engine.has_method("handle_discard_with_madness") else engine._on_card_to_graveyard(best_card)
+				if engine.has_method("handle_discard_with_madness"):
+					engine.handle_discard_with_madness(best_card, pid)
+				else:
+					engine._on_card_to_graveyard(best_card)
+	if not waiting_human_discard and on_done.is_valid():
+		on_done.call(did_any_discard)
 
 static func _apply_noncombat_damage_modifiers(base_amount: int, source_controller_id: int, target_owner_id: int, target_is_permanent: bool, engine: Node) -> int:
 	if base_amount <= 0 or engine == null:
@@ -519,12 +811,19 @@ static func _handle_damage(c: String, source: Node3D, target: Variant, engine: N
 	var has_lifelink: bool = source != null and source.has_method("has_keyword") and bool(source.has_keyword("lifelink"))
 	var total_dealt := 0
 
+	var src_ol_d := str(MagicRules.get_card_attribute(source.card_data, "oracle_text", "")).to_lower() if source != null else ""
+	var has_infect: bool = (source != null and source.has_method("has_keyword") and bool(source.has_keyword("infect"))) or ("infect" in src_ol_d)
+	var has_wither: bool = has_infect or (source != null and source.has_method("has_keyword") and bool(source.has_keyword("wither"))) or ("wither" in src_ol_d)
 	if "each creature" in c or "all creatures" in c:
 		for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
+			if MagicRules.has_protection_from(n, source) and not MagicRules.is_damage_unpreventable(source, engine): continue
 			if "marked_damage" in n:
 				var tgt_owner: int = engine.get_card_owner_id(n) if engine else -1
 				var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_owner, true, engine)
-				n.marked_damage += final_amt
+				if has_wither and n.has_method("modify_counters"):
+					n.modify_counters(-final_amt)
+				else:
+					n.marked_damage += final_amt
 				if has_deathtouch: n.has_deathtouch_damage = true
 				n.refresh_visual_status()
 				total_dealt += final_amt
@@ -546,7 +845,10 @@ static func _handle_damage(c: String, source: Node3D, target: Variant, engine: N
 			EventBus.damage_dealt.emit(source, t_node, final_amt)
 			total_dealt += final_amt
 		elif "marked_damage" in t_node:
-			t_node.marked_damage += final_amt
+			if has_wither and t_node.has_method("modify_counters"):
+				t_node.modify_counters(-final_amt)
+			else:
+				t_node.marked_damage += final_amt
 			if has_deathtouch: t_node.has_deathtouch_damage = true
 			t_node.refresh_visual_status()
 			EventBus.damage_dealt.emit(source, t_node, final_amt)
@@ -554,7 +856,10 @@ static func _handle_damage(c: String, source: Node3D, target: Variant, engine: N
 	elif target is int and engine:
 		var tgt_pid := int(target)
 		var final_amt := _apply_noncombat_damage_modifiers(amount, owner_id, tgt_pid, false, engine)
-		engine.modify_life(tgt_pid, -final_amt)
+		if has_infect:
+			engine.modify_player_counter(tgt_pid, "poison", final_amt)
+		else:
+			engine.modify_life(tgt_pid, -final_amt)
 		EventBus.damage_dealt.emit(source, tgt_pid, final_amt)
 		total_dealt += final_amt
 	elif engine:
@@ -610,10 +915,15 @@ static func _handle_counters(c: String, source: Node3D, target: Variant, engine:
 	elif "gets " in c:
 		amount = _extract_number(c, "gets ")
 	else:
-		amount = _extract_number(c, "put ")
+		amount = _extract_dynamic_amount(c, "put ", source, target, engine, owner_id)
 
 	var c_type := ""
-	if "+1/+1 counter" in c:
+	if "{e}" in c:
+		c_type = "energy"
+		var e_cnt := c.count("{e}")
+		if e_cnt > 0:
+			amount = -e_cnt if is_remove else e_cnt
+	elif "+1/+1 counter" in c:
 		c_type = "+1/+1"
 	elif "-1/-1 counter" in c:
 		c_type = "-1/-1"
@@ -625,7 +935,7 @@ static func _handle_counters(c: String, source: Node3D, target: Variant, engine:
 		return
 
 	# Player counters ("you get", "target player gets", "remove ... from target player")
-	var is_player_counter := ("get " in c or "gets " in c or "target player" in c or "each player" in c or "target opponent" in c or "each opponent" in c or "from you" in c) and not ("creature" in c or "permanent" in c or "artifact" in c or "planeswalker" in c)
+	var is_player_counter := ("{e}" in c or c_type in ["energy", "poison", "experience", "rad"] or "get " in c or "gets " in c or "target player" in c or "each player" in c or "target opponent" in c or "each opponent" in c or "from you" in c) and not ("creature" in c or "permanent" in c or "artifact" in c or "planeswalker" in c)
 	if is_player_counter and engine:
 		for pid in _resolve_affected_players(c, engine, owner_id, target):
 			if is_double:
@@ -649,22 +959,65 @@ static func _handle_counters(c: String, source: Node3D, target: Variant, engine:
 			if n_delta != 0 and n.has_method("modify_named_counter"):
 				n.modify_named_counter(c_type, n_delta)
 
-static func _handle_create_tokens(c: String, engine: Node) -> void:
+static func _handle_create_tokens(c: String, engine: Node, owner_id: int = 1, target: Variant = null) -> void:
 	if not engine or not engine.has_method("_spawn_new_token"): return
 	var amount := _extract_number(c, "create ")
+	if "for each opponent" in c and ("dealt damage this turn" in c or "lost life this turn" in c):
+		var dmg_map: Dictionary = engine.get("players_damaged_this_turn") if "players_damaged_this_turn" in engine else {}
+		var opp_cnt := 0
+		for pid in [1, 2, 3, 4]:
+			if pid != owner_id and bool(dmg_map.get(pid, false)):
+				opp_cnt += 1
+		amount = opp_cnt
+	elif "for each player" in c and "dealt damage this turn" in c:
+		var dmg_map2: Dictionary = engine.get("players_damaged_this_turn") if "players_damaged_this_turn" in engine else {}
+		var p_cnt := 0
+		for pid in [1, 2, 3, 4]:
+			if bool(dmg_map2.get(pid, false)):
+				p_cnt += 1
+		amount = p_cnt
+	if amount <= 0:
+		return
+	var tok_pids: Array[int] = [owner_id]
+	if "its controller" in c or "that creature's controller" in c or "that permanent's controller" in c or "that spell's controller" in c:
+		var ctrl_pid: int = int(engine.get_meta("last_target_controller_id")) if engine.has_meta("last_target_controller_id") else -1
+		if ctrl_pid <= 0 and target is Node3D and is_instance_valid(target):
+			ctrl_pid = engine.get_card_controller_id(target)
+		elif ctrl_pid <= 0 and target is int and int(target) > 0:
+			ctrl_pid = int(target)
+		if ctrl_pid > 0:
+			tok_pids = [ctrl_pid]
+	elif ("target opponent creates" in c or "target player creates" in c) and target is int and int(target) > 0:
+		tok_pids = [int(target)]
+	elif "each opponent creates" in c:
+		tok_pids = []
+		for op in [1, 2, 3, 4]:
+			if op != owner_id and int(engine.player_life.get(op, 0)) > 0:
+				tok_pids.append(op)
 	var artifact_presets := {"treasure": "Treasure", "clue": "Clue", "food": "Food", "blood": "Blood", "map": "Map", "powerstone": "Powerstone"}
 	for key in artifact_presets.keys():
 		if key in c:
 			var target_name: String = artifact_presets[key]
 			for t in engine.COMMON_TOKENS:
 				if t["name"] == target_name:
-					for i in range(amount): engine._spawn_new_token(t)
+					for p_dest in tok_pids:
+						for i in range(amount): engine._spawn_new_token(t, p_dest)
 					return
 
 	var m := _TOKEN_PT_REGEX.search(c)
 	if m:
 		var pow_str := m.get_string(1)
 		var tou_str := m.get_string(2)
+		if pow_str == "x" or tou_str == "x":
+			var x_pt := 0
+			if "mana value" in c and target is Node3D and is_instance_valid(target):
+				x_pt = int(target.card_data.get("cmc", 0))
+			elif "cards in your hand" in c and engine:
+				x_pt = engine.hand_cards.size() if owner_id == engine.local_player_id else (engine.player_hands.get(owner_id, []) as Array).size()
+			elif "your life" in c and engine:
+				x_pt = maxi(0, int(engine.player_life.get(owner_id, 0)))
+			if pow_str == "x": pow_str = str(x_pt)
+			if tou_str == "x": tou_str = str(x_pt)
 		var raw_desc := m.get_string(3).strip_edges().to_lower()
 		var color_map := {"white": "w", "blue": "u", "black": "b", "red": "r", "green": "g", "colorless": "c"}
 		var extra_types := ["artifact", "enchantment", "legendary", "snow"]
@@ -709,7 +1062,8 @@ static func _handle_create_tokens(c: String, engine: Node) -> void:
 			"oracle_text": tok_oracle,
 			"query": " ".join(query_parts)
 		}
-		for i in range(amount): engine._spawn_new_token(token_dict)
+		for p_dest in tok_pids:
+			for i in range(amount): engine._spawn_new_token(token_dict, p_dest)
 
 static func _handle_add_mana(clause: String, source: Node3D, engine: Node) -> void:
 	var lower := clause.to_lower()
@@ -732,18 +1086,18 @@ static func _resolve_affected_permanents(c: String, source: Node3D, target: Vari
 
 	var all_perms: Array = engine.battlefield_lands + engine.battlefield_non_lands
 	var matched_group := false
-	if "all creatures" in c or "each creature" in c:
+	if "creatures you control" in c or "each creature you control" in c:
 		matched_group = true
 		for p in all_perms:
-			if is_instance_valid(p) and MagicRules.is_creature(p.card_data): result.append(p)
-	elif "creatures you control" in c:
+			if is_instance_valid(p) and MagicRules.is_creature(p.card_data, 0, p) and engine.get_card_controller_id(p) == owner_id: result.append(p)
+	elif "creatures your opponents control" in c or "creatures you don't control" in c or "each creature your opponents control" in c:
 		matched_group = true
 		for p in all_perms:
-			if is_instance_valid(p) and MagicRules.is_creature(p.card_data) and engine.get_card_owner_id(p) == owner_id: result.append(p)
-	elif "creatures your opponents control" in c or "creatures you don't control" in c:
+			if is_instance_valid(p) and MagicRules.is_creature(p.card_data, 0, p) and engine.get_card_controller_id(p) != owner_id: result.append(p)
+	elif "all creatures" in c or "each creature" in c:
 		matched_group = true
 		for p in all_perms:
-			if is_instance_valid(p) and MagicRules.is_creature(p.card_data) and engine.get_card_owner_id(p) != owner_id: result.append(p)
+			if is_instance_valid(p) and MagicRules.is_creature(p.card_data, 0, p): result.append(p)
 	elif "all artifacts" in c or "each artifact" in c:
 		matched_group = true
 		for p in all_perms:
@@ -785,7 +1139,12 @@ static func _resolve_affected_permanents(c: String, source: Node3D, target: Vari
 		return result
 
 	if target is Node3D and is_instance_valid(target): result.append(target)
-	elif source and is_instance_valid(source) and ("this " in c or "itself" in c or "on it" in c): result.append(source)
+	elif source and is_instance_valid(source):
+		var src_name := str(source.card_data.get("name", "")).to_lower().split(" // ")[0].strip_edges()
+		var src_short := src_name.split(",")[0].strip_edges() if "," in src_name else src_name
+		var mentions_self := ("this " in c or "itself" in c or "on it" in c or "~" in c or (not src_name.is_empty() and src_name in c) or (src_short.length() >= 3 and src_short in c))
+		if mentions_self or not ("target" in c):
+			result.append(source)
 	return result
 
 static func _resolve_affected_players(c: String, _engine: Node, owner_id: int, target: Variant) -> Array[int]:
@@ -810,6 +1169,10 @@ static func _resolve_affected_players(c: String, _engine: Node, owner_id: int, t
 		if not (tgt_pid in pids) and is_living.call(tgt_pid):
 			pids.append(tgt_pid)
 		return pids
+	if ("that player" in c or "they " in c) and target is int:
+		var t_p: int = int(target)
+		if is_living.call(t_p):
+			return [t_p]
 	return [owner_id]
 
 static func _extract_number(text: String, prefix: String) -> int:
@@ -835,12 +1198,12 @@ static func _extract_number(text: String, prefix: String) -> int:
 			if num_str.is_valid_int(): return num_str.to_int()
 	return 1
 
-static func _evaluate_for_each_count(c: String, source: Node3D, engine: Node, owner_id: int) -> int:
+static func _evaluate_for_each_count(c: String, _source: Node3D, engine: Node, owner_id: int) -> int:
 	if not ("for each " in c) or not engine: return 1
 	var count := 0
 	if "creature you control" in c or "creatures you control" in c:
 		for p in engine.battlefield_non_lands:
-			if is_instance_valid(p) and MagicRules.is_creature(p.card_data) and engine.get_card_owner_id(p) == owner_id:
+			if is_instance_valid(p) and MagicRules.is_creature(p.card_data, 0, p) and engine.get_card_owner_id(p) == owner_id:
 				count += 1
 	elif "opponent" in c:
 		for pid in [1, 2, 3, 4]:
@@ -914,7 +1277,7 @@ static func _handle_set_base_pt(c: String, source: Node3D, target: Variant, engi
 	for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
 		n.set_meta("base_pt_override", Vector2i(bp, bt))
 
-static func _handle_fight(source: Node3D, target: Variant, engine: Node) -> void:
+static func _handle_fight(source: Node3D, target: Variant, _engine: Node) -> void:
 	if not source or not is_instance_valid(source) or not (target is Node3D) or not is_instance_valid(target): return
 	var tgt := target as Node3D
 	var src_pow: int = int(source.get("dynamic_power")) if source.get("dynamic_power") != null else 0
@@ -1147,9 +1510,9 @@ static func _handle_look_top_cards(c: String, engine: Node, owner_id: int) -> vo
 				else:
 					lib.push_front(card_n)
 
-static func _extract_dynamic_amount(c: String, prefix: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> int:
-	if "equal to " in c:
-		if "its power" in c or "source's power" in c:
+static func _extract_dynamic_amount(c: String, prefix: String, source: Node3D, _target: Variant, engine: Node, owner_id: int) -> int:
+	if "equal to " in c or "where x is " in c:
+		if "its power" in c or "source's power" in c or "this creature's power" in c or "'s power" in c:
 			if source != null and is_instance_valid(source) and "dynamic_power" in source:
 				return maxi(0, int(source.dynamic_power))
 		if "cards in your hand" in c and engine:
@@ -1161,10 +1524,168 @@ static func _extract_dynamic_amount(c: String, prefix: String, source: Node3D, t
 				if not is_instance_valid(p) or not p.is_on_battlefield: continue
 				if only_yours and engine.get_card_controller_id(p) != owner_id: continue
 				var tl := MagicRules.get_card_type_line(p.card_data).to_lower()
-				if "creatures" in c and MagicRules.is_creature(p.card_data): cnt += 1
+				if "creatures" in c and MagicRules.is_creature(p.card_data, 0, p): cnt += 1
 				elif "artifacts" in c and "artifact" in tl: cnt += 1
 				elif "enchantments" in c and "enchantment" in tl: cnt += 1
 				elif "lands" in c and MagicRules.is_land(p.card_data): cnt += 1
 				elif "permanents" in c: cnt += 1
 			return cnt
 	return _extract_number(c, prefix)
+
+
+static func _handle_empower_jace(c: String, engine: Node, owner_id: int) -> void:
+	if not engine: return
+	var n_val: int = maxi(1, _extract_number(c, "empower jace "))
+	var jace_tokens: Array[Node3D] = []
+	for p in engine.battlefield_non_lands:
+		if not is_instance_valid(p) or not p.is_on_battlefield: continue
+		if engine.get_card_controller_id(p) != owner_id: continue
+		if not bool(p.get("is_token")): continue
+		if not MagicRules.is_planeswalker(p.card_data): continue
+		var tl := MagicRules.get_card_type_line(p.card_data).to_lower()
+		var nm := str(p.card_data.get("name", "")).to_lower()
+		if "jace" in tl or "jace" in nm:
+			jace_tokens.append(p)
+	if jace_tokens.is_empty():
+		if engine.has_method("_spawn_new_token"):
+			var jace_data := {
+				"name": "Jace",
+				"type_line": "Token Planeswalker — Jace",
+				"colors": ["U"],
+				"loyalty": "0",
+				"oracle_text": "-1: Surveil 1.\n-3: Draw a card.",
+				"query": "t:token t:planeswalker t:jace",
+				"starting_loyalty_counters": n_val
+			}
+			engine._spawn_new_token(jace_data, 1, owner_id)
+		return
+	if jace_tokens.size() == 1 or owner_id != engine.local_player_id:
+		var target_jace: Node3D = jace_tokens[0]
+		if target_jace.has_method("modify_named_counter"):
+			target_jace.modify_named_counter("loyalty", n_val)
+		return
+	if engine.hud_manager and engine.hud_manager.has_method("open_choice_popup"):
+		var opts: Array[String] = []
+		for jt in jace_tokens:
+			var cur_l: int = jt.get_named_counter("loyalty") if jt.has_method("get_named_counter") else 0
+			opts.append("%s (%d Loyalty)" % [str(jt.card_data.get("name", "Jace")), cur_l])
+		engine.hud_manager.open_choice_popup("EMPOWER JACE %d — CHOOSE JACE TOKEN" % n_val, opts, func(idx: int):
+			if idx >= 0 and idx < jace_tokens.size() and is_instance_valid(jace_tokens[idx]):
+				jace_tokens[idx].modify_named_counter("loyalty", n_val)
+		)
+
+
+static func _handle_animate_permanent(c: String, source: Node3D, target: Variant, engine: Node, owner_id: int) -> void:
+	var pt_rx := RegEx.new()
+	pt_rx.compile("(\\d+|x)\\s*/\\s*(\\d+|x)")
+	var m := pt_rx.search(c)
+	var bp := 0
+	var bt := 0
+	var has_pt: bool = false
+	if m:
+		has_pt = true
+		var ps := m.get_string(1).to_lower()
+		var ts := m.get_string(2).to_lower()
+		var x_v: int = int(source.get_meta("chosen_x")) if (source != null and is_instance_valid(source) and source.has_meta("chosen_x")) else 0
+		bp = x_v if ps == "x" else ps.to_int()
+		bt = x_v if ts == "x" else ts.to_int()
+	var is_eot := ("until end of turn" in c or "until your next turn" in c)
+	var granted: Array[String] = []
+	for kw in ContinuousEffectsEngine.GRANTABLE_KEYWORDS:
+		if kw in c:
+			granted.append(kw)
+	if "can't be blocked" in c and not ("unblockable" in granted):
+		granted.append("unblockable")
+	for n in _resolve_affected_permanents(c, source, target, engine, owner_id):
+		if "type_overrides" in n and not ("Creature" in n.type_overrides):
+			n.type_overrides.append("Creature")
+		if is_eot:
+			n.set_meta("animated_until_eot", true)
+			n.set_meta("base_pt_until_eot", true)
+		else:
+			n.set_meta("animated_perm", true)
+			n.remove_meta("animated_until_eot")
+			n.remove_meta("base_pt_until_eot")
+		if has_pt:
+			n.set_meta("base_pt_override", Vector2i(bp, bt))
+		if not granted.is_empty():
+			var meta_key := "temp_granted_keywords" if is_eot else "perm_granted_keywords"
+			var existing: Array = n.get_meta(meta_key) if n.has_meta(meta_key) else []
+			for kw in granted:
+				if not (kw in existing): existing.append(kw)
+			n.set_meta(meta_key, existing)
+		if n.has_method("refresh_visual_status"):
+			n.refresh_visual_status()
+	if engine and engine.has_method("run_state_based_actions"):
+		engine.run_state_based_actions()
+
+
+static func _handle_proliferate(engine: Node, owner_id: int, on_done: Callable) -> void:
+	if not engine:
+		on_done.call(true)
+		return
+	var candidates: Array = []
+	for p_node in engine.battlefield_lands + engine.battlefield_non_lands:
+		if not is_instance_valid(p_node): continue
+		var has_pt: bool = "counter_amount" in p_node and int(p_node.counter_amount) != 0
+		var has_named: bool = "custom_counters" in p_node and p_node.custom_counters is Dictionary and not (p_node.custom_counters as Dictionary).is_empty()
+		if not has_pt and not has_named: continue
+		var p_owner: int = engine.get_card_controller_id(p_node)
+		var c_parts: Array[String] = []
+		if has_pt:
+			c_parts.append("%+d/%+d" % [int(p_node.counter_amount), int(p_node.counter_amount)])
+		if has_named:
+			for ck in p_node.custom_counters.keys():
+				c_parts.append("%s:%d" % [str(ck), int(p_node.custom_counters[ck])])
+		var def_sel: bool = (p_owner == owner_id and (not has_pt or int(p_node.counter_amount) > 0)) or (p_owner != owner_id and has_pt and int(p_node.counter_amount) < 0)
+		candidates.append({
+			"kind": "perm",
+			"node": p_node,
+			"label": "P%d %s (%s)" % [p_owner, str(p_node.card_data.get("name", "Permanent")), ", ".join(c_parts)],
+			"default_selected": def_sel
+		})
+	for pid in [1, 2, 3, 4]:
+		var pc_dict: Dictionary = engine.player_counters.get(pid, {})
+		var p_parts: Array[String] = []
+		for pk in pc_dict.keys():
+			if int(pc_dict[pk]) > 0:
+				p_parts.append("%s:%d" % [str(pk), int(pc_dict[pk])])
+		if not p_parts.is_empty():
+			var p_def: bool = (pid == owner_id) or (pid != owner_id and int(pc_dict.get("poison", 0)) > 0)
+			candidates.append({
+				"kind": "player",
+				"pid": pid,
+				"label": "Player P%d (%s)" % [pid, ", ".join(p_parts)],
+				"default_selected": p_def
+			})
+
+	if candidates.is_empty():
+		on_done.call(true)
+		return
+
+	var apply_chosen := func(chosen_list: Array):
+		for item in chosen_list:
+			if item.get("kind") == "perm":
+				var pn: Node3D = item.get("node")
+				if not is_instance_valid(pn): continue
+				if "counter_amount" in pn and int(pn.counter_amount) != 0 and pn.has_method("modify_counters"):
+					pn.modify_counters(1 if int(pn.counter_amount) > 0 else -1)
+				if "custom_counters" in pn and pn.custom_counters is Dictionary:
+					for ck in pn.custom_counters.keys():
+						pn.modify_named_counter(str(ck), 1)
+			elif item.get("kind") == "player":
+				var t_pid: int = int(item.get("pid", 0))
+				var d_pc: Dictionary = engine.player_counters.get(t_pid, {})
+				for pk in d_pc.keys():
+					if int(d_pc[pk]) > 0:
+						engine.modify_player_counter(t_pid, str(pk), 1)
+		on_done.call(true)
+
+	if owner_id == engine.local_player_id and engine.hud_manager and engine.hud_manager.has_method("open_proliferate_popup"):
+		engine.hud_manager.open_proliferate_popup(candidates, apply_chosen)
+	else:
+		var ai_picks: Array = []
+		for cand in candidates:
+			if bool(cand.get("default_selected", false)):
+				ai_picks.append(cand)
+		apply_chosen.call(ai_picks)

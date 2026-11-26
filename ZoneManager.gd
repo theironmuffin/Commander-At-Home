@@ -29,19 +29,21 @@ func update_commander_tax_counter() -> void:
 
 func untap_single_card(card_node: Node3D) -> void:
 	if card_node:
+		if card_node.has_method("get_named_counter") and card_node.get_named_counter("stun") > 0:
+			card_node.modify_named_counter("stun", -1)
+			return
 		card_node.is_tapped = false
 		engine.event_ledger.log_event(GameEventLedger.EventType.CARD_UNTAPPED, {"card_name": card_node.card_data.get("name", "")})
 		update_battlefield_positions(true)
 
 func untap_all(target_player_id: int = 1) -> void:
-	for card in engine.battlefield_lands:
+	for card in engine.battlefield_lands + engine.battlefield_non_lands:
 		if is_instance_valid(card) and engine.get_card_owner_id(card) == target_player_id:
-			card.is_tapped = false
 			card.has_summoning_sickness = false
-	for card in engine.battlefield_non_lands:
-		if is_instance_valid(card) and engine.get_card_owner_id(card) == target_player_id:
-			card.is_tapped = false
-			card.has_summoning_sickness = false
+			if card.is_tapped and card.has_method("get_named_counter") and card.get_named_counter("stun") > 0:
+				card.modify_named_counter("stun", -1)
+			else:
+				card.is_tapped = false
 
 	engine.event_ledger.log_event(GameEventLedger.EventType.CARD_UNTAPPED, {"target_player_id": target_player_id})
 	update_battlefield_positions(true)
@@ -60,7 +62,11 @@ func shuffle_library() -> void:
 		tween.tween_property(c, "quaternion", Quaternion.IDENTITY, 0.35)
 
 func draw_card() -> void:
-	if engine.library_stack.is_empty(): return
+	if engine.library_stack.is_empty():
+		if not engine.mulligan_phase_active and engine.turn_manager != null and engine.turn_manager.turn_number >= 1:
+			engine.drawn_from_empty_library[engine.local_player_id] = true
+			engine.run_state_based_actions()
+		return
 	EventBus.play_sfx("draw")
 	var card_node: Node3D = engine.library_stack.pop_back()
 	var global_trans := card_node.global_transform
@@ -69,7 +75,9 @@ func draw_card() -> void:
 
 	if card_node.has_method("make_active"): card_node.make_active(card_node.card_data)
 	engine.connect_card_signals(card_node)
+	card_node.set_meta("arc_draw_anim", true)
 	engine.hand_cards.append(card_node)
+	if engine.has_method("record_match_stat"): engine.record_match_stat(engine.local_player_id, "cards_drawn", 1)
 
 	engine.event_ledger.log_event(GameEventLedger.EventType.CARD_MOVED, {
 		"card_name": card_node.card_data.get("name", ""),
@@ -80,13 +88,19 @@ func draw_card() -> void:
 
 	update_hand_positions(true)
 	update_zone_counters()
+	if not engine.mulligan_phase_active and engine.turn_manager != null and engine.turn_manager.turn_number >= 1:
+		engine.check_and_queue_triggers("DRAW", null, engine.local_player_id)
 
 func draw_opponent_card(player_id: int) -> void:
 	var opp_lib: Array = engine.player_libraries.get(player_id, [])
 	var opp_hand: Array = engine.player_hands.get(player_id, [])
 	var opp_hand_cont: Node3D = engine.player_hand_containers.get(player_id, null)
 
-	if opp_lib.is_empty(): return
+	if opp_lib.is_empty():
+		if not engine.mulligan_phase_active and engine.turn_manager != null and engine.turn_manager.turn_number >= 1:
+			engine.drawn_from_empty_library[player_id] = true
+			engine.run_state_based_actions()
+		return
 	EventBus.play_sfx("draw")
 
 	var card_node: Node3D = opp_lib.pop_back()
@@ -96,7 +110,9 @@ func draw_opponent_card(player_id: int) -> void:
 			card_node.reparent(opp_hand_cont, true)
 			card_node.global_transform = global_trans
 
+		card_node.set_meta("arc_draw_anim", true)
 		opp_hand.append(card_node)
+		if engine.has_method("record_match_stat"): engine.record_match_stat(player_id, "cards_drawn", 1)
 		update_opponent_hand_positions(player_id, true)
 		update_zone_counters()
 		engine.event_ledger.log_event(GameEventLedger.EventType.CARD_MOVED, {
@@ -105,6 +121,8 @@ func draw_opponent_card(player_id: int) -> void:
 			"to_zone": "Hand",
 			"player_id": player_id
 		})
+		if not engine.mulligan_phase_active and engine.turn_manager != null and engine.turn_manager.turn_number >= 1:
+			engine.check_and_queue_triggers("DRAW", null, player_id)
 
 
 func update_opponent_hand_positions(pid: int, animated: bool = false) -> void:
@@ -121,8 +139,12 @@ func update_opponent_hand_positions(pid: int, animated: bool = false) -> void:
 		var target_pos := Vector3(start_x + (i * current_spacing), 0.0, float(i) * 0.002)
 		var target_rot := Vector3(deg_to_rad(80.0), 0.0, PI)
 		if animated:
-			tween.tween_property(card_instance, "position", target_pos, 0.35)
-			tween.tween_property(card_instance, "rotation", target_rot, 0.35)
+			if card_instance.has_meta("arc_draw_anim"):
+				card_instance.remove_meta("arc_draw_anim")
+				_tween_bezier_arc(card_instance, target_pos, target_rot, 0.48, 0.36)
+			else:
+				tween.tween_property(card_instance, "position", target_pos, 0.35)
+				tween.tween_property(card_instance, "rotation", target_rot, 0.35)
 		else:
 			card_instance.position = target_pos
 			card_instance.rotation = target_rot
@@ -179,6 +201,20 @@ func update_battlefield_positions(animated: bool = false) -> void:
 		if not opp_non_lands.is_empty() and non_lands_anc:
 			_arrange_cards_in_row(opp_non_lands, engine.battlefield_non_lands_spacing_x, 0.0, 0.0, animated, tween, non_lands_anc)
 
+func _get_card_jitter(card: Node3D) -> Dictionary:
+	if not is_instance_valid(card):
+		return {"dx": 0.0, "dz": 0.0, "dyaw": 0.0}
+	if card.has_meta("board_jitter"):
+		var cached = card.get_meta("board_jitter")
+		if cached is Dictionary: return cached
+	var jit := {
+		"dx": randf_range(-0.022, 0.022),
+		"dz": randf_range(-0.022, 0.022),
+		"dyaw": deg_to_rad(randf_range(-2.2, 2.2))
+	}
+	card.set_meta("board_jitter", jit)
+	return jit
+
 func _arrange_cards_in_row(cards: Array[Node3D], spacing: float, y_pos: float, z_pos: float, animated: bool, tween: Tween, parent_anchor: Node3D = null) -> void:
 	# Group same-named cards (separated by tapped state) into stacks of up to max_stack_group_size (5)
 	var max_per_stack: int = max(1, engine.max_stack_group_size)
@@ -228,14 +264,32 @@ func _arrange_cards_in_row(cards: Array[Node3D], spacing: float, y_pos: float, z
 					dir_local.y = 0.0
 					if dir_local.length() > 0.01:
 						atk_offset = dir_local.normalized() * 0.65 + Vector3(0.0, 0.06, 0.0)
-			var target_pos := Vector3(base_x, y_pos, z_pos) + cascade_offset + atk_offset
-			var target_rot := Vector3(0.0, deg_to_rad(-90.0) if card.is_tapped else 0.0, 0.0)
+			var jit := _get_card_jitter(card)
+			var target_pos := Vector3(base_x + float(jit["dx"]), y_pos, z_pos + float(jit["dz"])) + cascade_offset + atk_offset
+			var target_rot := Vector3(0.0, (deg_to_rad(-90.0) if card.is_tapped else 0.0) + float(jit["dyaw"]), 0.0)
 			if animated:
 				tween.tween_property(card, "position", target_pos, 0.35)
 				tween.tween_property(card, "rotation", target_rot, 0.35)
 			else:
 				card.position = target_pos
 				card.rotation = target_rot
+			if "attachments" in card and not card.attachments.is_empty():
+				for a_idx in range(card.attachments.size()):
+					var att: Node3D = card.attachments[a_idx]
+					if not is_instance_valid(att): continue
+					if parent_anchor != null and att.get_parent() != parent_anchor:
+						var gt_att := att.global_transform
+						att.reparent(parent_anchor, true)
+						att.global_transform = gt_att
+					att.is_tapped = false
+					var att_pos := target_pos + Vector3(-0.08 * float(a_idx + 1), -0.004 * float(a_idx + 1), -0.14 * float(a_idx + 1))
+					var att_rot := Vector3.ZERO
+					if animated and tween:
+						tween.tween_property(att, "position", att_pos, 0.35)
+						tween.tween_property(att, "rotation", att_rot, 0.35)
+					else:
+						att.position = att_pos
+						att.rotation = att_rot
 
 func remove_from_battlefield(card_node: Node3D) -> void:
 	engine.battlefield_lands.erase(card_node)
@@ -409,6 +463,7 @@ func move_to_stack(card_node: Node3D) -> void:
 
 	update_zone_counters()
 	EventBus.notify_stack(engine.active_stack.size())
+	if engine.has_method("record_match_stat"): engine.record_match_stat(engine.get_card_owner_id(card_node), "spells_cast", 1)
 	engine.check_and_queue_triggers("CAST", card_node)
 	if engine.has_method("on_spell_cast_mechanics"): engine.on_spell_cast_mechanics(card_node)
 
@@ -434,11 +489,28 @@ func _check_commander_redirect(card_node: Node3D, dest_name: String, leave_fn: C
 				else:
 					card_node.set_meta("cmd_redirect_resolved", true)
 					leave_fn.call(card_node)
+				engine.sync_network_state()
 		)
 		return true
 	return false
 
 func move_to_graveyard(card_node: Node3D) -> void:
+	if card_node and is_instance_valid(card_node):
+		var c_owner: int = engine.get_card_owner_id(card_node)
+		for p in engine.battlefield_lands + engine.battlefield_non_lands:
+			if not is_instance_valid(p) or p == card_node: continue
+			var p_ol := str(MagicRules.get_card_attribute(p.card_data, "oracle_text", "")).to_lower()
+			if ("would be put into a graveyard" in p_ol or "would be put into an opponent's graveyard" in p_ol or "would die" in p_ol) and "exile it instead" in p_ol:
+				var p_ctrl: int = engine.get_card_controller_id(p)
+				if "opponent's graveyard" in p_ol and c_owner == p_ctrl: continue
+				move_to_exile(card_node)
+				return
+	if card_node and is_instance_valid(card_node) and card_node.is_on_battlefield and card_node.has_method("get_named_counter") and card_node.get_named_counter("finality") > 0:
+		move_to_exile(card_node)
+		return
+	var was_bf_creature: bool = card_node != null and is_instance_valid(card_node) and card_node.is_on_battlefield and MagicRules.is_creature(card_node.card_data, 0, card_node)
+	var pre_ctr: int = int(card_node.get("counter_amount")) if (card_node and "counter_amount" in card_node) else 0
+	var pre_ol: String = str(MagicRules.get_card_attribute(card_node.card_data, "oracle_text", "")).to_lower() if card_node else ""
 	if _destroy_if_token(card_node): return
 	if _check_commander_redirect(card_node, "Graveyard", func(c): move_to_graveyard(c)): return
 	remove_from_battlefield(card_node)
@@ -447,6 +519,17 @@ func move_to_graveyard(card_node: Node3D) -> void:
 	if card_node.collision_shape: card_node.collision_shape.disabled = false
 
 	if card_node.has_method("make_active"): card_node.make_active(card_node.card_data)
+	if was_bf_creature and not bool(card_node.get("is_token")):
+		var has_undying: bool = (card_node.has_method("has_keyword") and bool(card_node.has_keyword("undying"))) or ("undying" in pre_ol)
+		var has_persist: bool = (card_node.has_method("has_keyword") and bool(card_node.has_keyword("persist"))) or ("persist" in pre_ol)
+		if has_undying and pre_ctr <= 0:
+			move_to_battlefield_from_zone(card_node, engine.get_card_owner_id(card_node), false)
+			if card_node.has_method("modify_counters"): card_node.modify_counters(1)
+			return
+		elif has_persist and pre_ctr >= 0:
+			move_to_battlefield_from_zone(card_node, engine.get_card_owner_id(card_node), false)
+			if card_node.has_method("modify_counters"): card_node.modify_counters(-1)
+			return
 	var owner_id: int = engine.get_card_owner_id(card_node)
 	if owner_id == engine.local_player_id:
 		engine.graveyard_stack.append(card_node)
@@ -482,16 +565,35 @@ func move_to_exile(card_node: Node3D) -> void:
 	if card_node.has_method("refresh_visual_status"): card_node.refresh_visual_status()
 	update_zone_counters()
 
+func _tween_bezier_arc(card_node: Node3D, target_pos: Vector3, target_rot: Vector3, arc_height: float = 0.45, duration: float = 0.34) -> void:
+	if not is_instance_valid(card_node) or not is_instance_valid(engine):
+		return
+	var start_pos: Vector3 = card_node.position
+	var start_rot: Vector3 = card_node.rotation
+	var ctrl_pos: Vector3 = start_pos.lerp(target_pos, 0.5) + Vector3(0.0, arc_height, 0.0)
+	var tw := engine.create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_method(func(t: float):
+		if not is_instance_valid(card_node): return
+		var p1 := start_pos.lerp(ctrl_pos, t)
+		var p2 := ctrl_pos.lerp(target_pos, t)
+		card_node.position = p1.lerp(p2, t)
+		card_node.rotation = start_rot.lerp(target_rot, t)
+	, 0.0, 1.0, duration)
+
 func _animate_to_pile(card_node: Node3D, anchor: Node3D, y_offset: float, stack_index: int = 0) -> void:
 	var global_trans := card_node.global_transform
 	card_node.reparent(anchor, true)
 	card_node.global_transform = global_trans
 
 	var fan_idx: int = stack_index % 8
-	var fan_pos := Vector3(fan_idx * 0.014, y_offset, fan_idx * 0.016)
+	var depth_y: float = maxf(y_offset, float(mini(stack_index, 24)) * 0.0055)
+	var yaw_j: float = float(((stack_index * 37) % 9) - 4) * 0.014
+	var p_jit := _get_card_jitter(card_node)
+	var fan_pos := Vector3(fan_idx * 0.012 + float(p_jit["dx"]) * 0.85, depth_y, fan_idx * 0.014 + float(p_jit["dz"]) * 0.85)
+	var target_q := Quaternion(Vector3.UP, yaw_j + float(p_jit["dyaw"]) * 1.35)
 	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tween.tween_property(card_node, "position", fan_pos, 0.35)
-	tween.tween_property(card_node, "quaternion", Quaternion.IDENTITY, 0.35)
+	tween.tween_property(card_node, "quaternion", target_q, 0.35)
 
 func move_to_battlefield_from_zone(card_node: Node3D, controller_id: int, enter_tapped: bool = false) -> void:
 	if not card_node or not is_instance_valid(card_node): return
@@ -558,14 +660,11 @@ func attach_card_to_creature(attachment: Node3D, target_creature: Node3D, pay_eq
 	attachment.visible = true
 	if attachment.collision_shape: attachment.collision_shape.disabled = false
 
-	attachment.reparent(target_creature, true)
-	var attach_idx: int = target_creature.attachments.find(attachment)
-	var target_local_pos := Vector3(-0.11 - (attach_idx * 0.05), -0.003 * (attach_idx + 1), -0.14 - (attach_idx * 0.05))
-
-	var tween := engine.create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	attachment.set_meta("_attach_tween", tween)
-	tween.tween_property(attachment, "position", target_local_pos, 0.3)
-	tween.tween_property(attachment, "quaternion", Quaternion.IDENTITY, 0.3)
+	var host_parent: Node = target_creature.get_parent() if target_creature.get_parent() != null else engine
+	if attachment.get_parent() != host_parent:
+		var gt_att := attachment.global_transform
+		attachment.reparent(host_parent, true)
+		attachment.global_transform = gt_att
 
 	engine.hud_manager.cancel_attachment_targeting()
 	update_battlefield_positions(true)
